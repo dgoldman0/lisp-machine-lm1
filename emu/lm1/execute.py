@@ -543,8 +543,12 @@ class Emulator:
         # ---- ALLOC.CONS Rd ----
         elif op == Op.ALLOC_CONS:
             rd = (inst.raw26 >> 21) & 0x1F
-            total_bytes = 3 * 8  # header + car + cdr = 24 bytes
-            self._alloc_cons(t, rd)
+            rs1 = inst.rs1  # car register
+            rs2 = inst.rs2  # cdr register
+            # Convention: rs1/rs2 == 0 → default to NIL (X-format compat)
+            car = t.regs[rs1] if rs1 != 0 else NIL
+            cdr = t.regs[rs2] if rs2 != 0 else NIL
+            self._alloc_cons(t, rd, car, cdr)
 
         # ---- ALLOCV Rd, Rs_length, #header_template ----
         elif op == Op.ALLOCV:
@@ -935,16 +939,17 @@ class Emulator:
         # Write a ref to the new object into Rd
         t.regs[rd] = make_ref(addr)
 
-    def _alloc_cons(self, t: ThreadContext, rd: int) -> None:
+    def _alloc_cons(self, t: ThreadContext, rd: int,
+                    car: int = NIL, cdr: int = NIL) -> None:
         """Allocate a cons cell (header + car + cdr = 24 bytes)."""
         addr = self._bump_alloc(t, 24)
 
         # Cons header: template index 0
         hdr = t.header_templates[0]
         self.mem.store_word(addr, hdr)
-        # car and cdr default to nil
-        self.mem.store_word(addr + 8, NIL)
-        self.mem.store_word(addr + 16, NIL)
+        # car and cdr from register operands (default nil for backward compat)
+        self.mem.store_word(addr + 8, car)
+        self.mem.store_word(addr + 16, cdr)
 
         # Cons ref (tag = 011)
         t.regs[rd] = make_ref(addr, cons=True)
