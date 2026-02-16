@@ -105,10 +105,50 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [ ] Condition system: `handler-bind`, `signal`, `invoke-restart`
 - [ ] Test: `(+ 1 2)` → `3` at the REPL. `(defun fact (n) (if (eq n 0) 1 (* n (fact (- n 1))))) (fact 10)` → `3628800`
 
+### Phase 9: VDI Display Engine (Emulator)
+**Goal:** Framebuffer output visible on the host. Blit and text primitives work.
+
+- [ ] VDI device model: framebuffer-backed MMIO (VDI_MODE, VDI_FB_BASE, VDI_PALETTE, etc.)
+- [ ] SDL2 host window (or Pygame fallback): present framebuffer as texture at 60 Hz
+- [ ] VDI drawing primitives: rect fill, bitblt with ROP, color expansion (font rendering)
+- [ ] 8-bit indexed-color palette with CLUT
+- [ ] Hardware cursor overlay
+- [ ] Host keyboard/mouse → LM-1 event injection
+- [ ] Emulator trap for VDI commands: `TRAP #0x83` (vdi_call, r1=function, r2..=args)
+- [ ] Test: fill screen with a color, draw rectangles, render text, animate cursor
+
+### Phase 10: Crystal Desktop — Window Manager
+**Goal:** Overlapping windows with move/resize/raise/lower, global menu bar, event dispatch.
+
+- [ ] Crystal AES: window open/close/move/resize, z-order management
+- [ ] Redraw protocol: AES sends redraw events, app repaints via VDI
+- [ ] Event loop: keyboard, mouse, timer events routed to focused window
+- [ ] Global menu bar (GEM-style: active app's menu merges with system menu)
+- [ ] Menus as Lisp lists — define, display, dispatch
+- [ ] Window decorations: title bar, close/full/iconify gadgets, resize handle
+- [ ] Click-to-focus policy
+- [ ] Desktop root window (background color/pattern, desktop icons)
+- [ ] Test: open 3 overlapping windows, move/resize/raise, menu bar responds
+
+### Phase 11: Crystal Desktop — Crystalets, File Manager, Theming
+**Goal:** Desk accessories, spatial file manager, resource system, scrap, themes.
+
+- [ ] Crystalet framework: system-registered micro-apps, always available
+- [ ] Standard Crystalets: clock, calculator, terminal (REPL-in-a-window), inspector
+- [ ] Scrap (clipboard): typed, structured, with history and type negotiation
+- [ ] Resource system: menus/dialogs/alerts as editable Lisp data
+- [ ] Spatial file manager: folder=window, icons, drag-and-drop, file associations
+- [ ] Desktop profile: serialize/deserialize desktop state as Lisp form
+- [ ] Theming: theme objects (colors, fonts, metrics, icons), live switching
+- [ ] Control Panel Crystalet: theme picker, mouse speed, resolution
+- [ ] Test: full desktop session — open file manager, launch editor, use clock, switch theme
+
 ---
 
 ## What to Build First
 
 Phases 1-2 are the foundation. Everything else depends on them. Phase 6 (assembler) could arguably come earlier — but hand-encoding a few small test programs is faster than building an assembler when we only need 10-20 instructions for initial tests.
+
+Phases 9-11 (graphics and desktop) depend on Phase 8 (Lispos kernel) for the object system and REPL. Phase 9 (VDI engine) can be prototyped in parallel with earlier phases by using emulator traps for VDI calls.
 
 **Start now: Phase 1.**

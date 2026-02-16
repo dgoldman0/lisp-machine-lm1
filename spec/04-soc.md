@@ -424,6 +424,84 @@ One or more 100 GbE ports for:
 - UART for boot console
 - Trace port for performance monitoring
 
+### 9.4 Display Controller
+
+A hardware display controller (the **VDI engine**, named after GEM's Virtual Device Interface) provides framebuffer-based output without consuming DOP tile cycles for pixel pushing.
+
+#### 9.4.1 Architecture
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                   VDI Display Engine                        │
+│                                                            │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐ │
+│  │   Scanout     │  │   Blit/Fill  │  │ Cursor / Sprite  │ │
+│  │   Controller  │  │   Accelerator│  │   Overlay        │ │
+│  │  (reads FB,   │  │  (rect fill, │  │  (HW cursor,     │ │
+│  │   generates   │  │   bitblt,    │  │   1 sprite plane) │ │
+│  │   pixel clock) │  │   ROP ops)  │  │                  │ │
+│  └───────┬───────┘  └──────┬──────┘  └────────┬─────────┘ │
+│          │                 │                   │            │
+│  ┌───────▼─────────────────▼───────────────────▼────────┐  │
+│  │           Display SRAM (2 MiB)                        │  │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐   │  │
+│  │  │ Framebuffer 0│ │ Framebuffer 1│ │ Blit Scratch │   │  │
+│  │  │ (up to 1 MiB)│ │ (up to 1 MiB)│ │  (256 KiB)  │   │  │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘   │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                            │
+│  ┌───────────┐  ┌───────────┐  ┌──────────────────────┐   │
+│  │  NoC Port  │  │  HDMI/DP  │  │  MMIO Register Bank │   │
+│  │ (DMA in)   │  │  PHY      │  │  (tile-accessible)  │   │
+│  └───────────┘  └───────────┘  └──────────────────────┘   │
+└────────────────────────────────────────────────────────────┘
+```
+
+#### 9.4.2 Display Modes
+
+| Mode | Resolution | Depth | FB Size | Refresh |
+|------|:----------:|:-----:|:-------:|:-------:|
+| Text/debug | 640×480 | 8-bit indexed | 300 KiB | 60 Hz |
+| Desktop | 1024×768 | 8-bit indexed | 768 KiB | 60 Hz |
+| Desktop hi-color | 1024×768 | 16-bit (5-6-5) | 1.5 MiB (double-buffered partial) | 60 Hz |
+| Retina/4K | Delegated to external GPU via PCIe | — | — | — |
+
+The on-die VDI engine targets **classic Atari ST / early Mac resolution** at high quality. For 4K output, an external GPU receives blitted frame data via PCIe DMA or a dedicated display link.
+
+#### 9.4.3 MMIO Registers
+
+Tiles interact with the VDI engine via memory-mapped I/O registers in the system region of the HBM address space:
+
+| Register | Offset | Description |
+|----------|:------:|-------------|
+| `VDI_MODE` | 0x00 | Resolution/depth selector |
+| `VDI_FB_BASE` | 0x08 | Active framebuffer base address |
+| `VDI_FB_STRIDE` | 0x10 | Bytes per scanline |
+| `VDI_PALETTE` | 0x18–0x218 | 256-entry CLUT (32-bit RGBA per entry) |
+| `VDI_CURSOR_X/Y` | 0x220/0x228 | Hardware cursor position |
+| `VDI_CURSOR_DATA` | 0x230 | Cursor bitmap base (32×32×2bpp) |
+| `VDI_BLIT_SRC` | 0x300 | Blit source address |
+| `VDI_BLIT_DST` | 0x308 | Blit destination address |
+| `VDI_BLIT_SIZE` | 0x310 | Blit width/height |
+| `VDI_BLIT_ROP` | 0x318 | Raster operation (GXcopy, GXxor, etc.) |
+| `VDI_BLIT_GO` | 0x320 | Write to trigger blit; read for busy flag |
+| `VDI_VSYNC` | 0x328 | VSync counter / interrupt control |
+
+#### 9.4.4 Blit Accelerator
+
+The blit engine supports GEM-style raster operations:
+
+- **Rect fill:** solid color or pattern fill to any FB rectangle
+- **BitBLT:** source-to-destination block transfer with 16 raster ops (GXcopy, GXor, GXxor, GXand, GXinvert, etc.)
+- **Color expansion:** 1-bit source to N-bit dest (for font rendering)
+- **Clipping:** hardware clip rectangle register
+
+Throughput: **1 pixel per clock** for simple ops, **2 clocks per pixel** for ROP-blended operations.
+
+#### 9.4.5 Emulation
+
+In the emulator, the VDI engine is modeled as a memory-mapped device. The emulator renders the framebuffer to a host window (via SDL/Pygame) or a VNC/web server. Blit operations execute immediately (no pipelining).
+
 ---
 
 ## 10. Boot Sequence
