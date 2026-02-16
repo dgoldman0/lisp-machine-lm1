@@ -73,6 +73,7 @@ class Op(IntEnum):
     LUI           = 0b111000  # 56
     PUSH_MULTI    = 0b111001  # 57  (Format I: rd=bank, imm16=register mask)
     POP_MULTI     = 0b111010  # 58  (Format I: rd=bank, imm16=register mask)
+    LI32          = 0b111011  # 59  (Format I: rd=dest, next word = 32-bit immediate)
 
     # System
     TRAP          = 0b111100  # 60

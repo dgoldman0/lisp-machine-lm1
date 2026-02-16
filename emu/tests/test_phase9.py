@@ -460,9 +460,9 @@ _start:
 @test("trap_vdi_grad_rect", batch="phase9_trap")
 def test_trap_vdi_grad_rect():
     """TRAP 0x83 with VDI_GRAD_RECT fills a gradient rectangle."""
-    # Use small color values that fit in 16-bit LI immediates
-    c1 = 100   # 0x000064 (near-black blue)
-    c2 = 200   # 0x0000C8 (slightly brighter blue)
+    c1 = rgb(255, 0, 0)   # 0xFF0000
+    c2 = rgb(0, 0, 255)   # 0x0000FF
+    # LI auto-expands to LI32 for large values
     asm = f"""\
 _start:
     LI sp, 0x3FF8
@@ -479,7 +479,7 @@ _start:
     HALT
 """
     vdi, emu, out = _asm_run(asm)
-    # Top should be c1, bottom should be c2
+    # Top should be red, bottom should be blue
     assert vdi.read_pixel(0, 0) == c1
     assert vdi.read_pixel(0, 15) == c2
 

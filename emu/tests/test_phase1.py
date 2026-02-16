@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 
 from lm1.testing.harness import test
+from lm1.asm import Assembler
 from lm1.decode import Op, encode_i, encode_r, encode_b, encode_x
 from lm1.execute import Emulator, EMU_TRAP_PUTCHAR
 from lm1.word import tag_fixnum, untag_fixnum, T, NIL
@@ -190,6 +191,54 @@ def test_li_lui_compose():
     ]
     _load_and_run(emu, program)
     assert emu.thread.regs[1] == 0x1234_5678
+
+
+@test("li32_load_large", batch="phase1_scalar")
+def test_li32_load_large():
+    """LI32 loads a full 32-bit immediate from the following word."""
+    emu = _emu()
+    # LI32 opcode word: rd=1, followed by the 32-bit immediate 0x00FF0000
+    program = [
+        encode_i(Op.LI32, 1, 0, 0),   # LI32 r1 (opcode word)
+        0x00FF0000,                     # immediate word
+        encode_x(Op.HALT_NOP, 0),
+    ]
+    _load_and_run(emu, program)
+    assert emu.thread.regs[1] == 0x00FF0000, f"got {emu.thread.regs[1]:#x}"
+
+
+@test("li32_asm_auto_expand", batch="phase1_scalar")
+def test_li32_asm_auto_expand():
+    """LI auto-expands to LI32 when value exceeds 16-bit signed range."""
+    asm = Assembler()
+    words = asm.assemble_to_words("""\
+_start:
+    LI r1, 0xFF0000
+    HALT
+""")
+    # Should emit 3 words: LI32 opcode, 0xFF0000 immediate, HALT
+    assert len(words) == 3, f"Expected 3 words, got {len(words)}"
+    # Confirm the opcode is LI32
+    opcode = (words[0] >> 26) & 0x3F
+    assert opcode == Op.LI32, f"Expected LI32 opcode, got {opcode}"
+    # Confirm the immediate word
+    assert words[1] == 0xFF0000, f"Expected 0xFF0000, got {words[1]:#x}"
+
+
+@test("li32_asm_small_stays_li", batch="phase1_scalar")
+def test_li32_asm_small_stays_li():
+    """LI stays as single-word LI when value fits in 16-bit signed."""
+    asm = Assembler()
+    words = asm.assemble_to_words("""\
+_start:
+    LI r1, 42
+    HALT
+""")
+    # Should emit 2 words: LI, HALT
+    assert len(words) == 2, f"Expected 2 words, got {len(words)}"
+    # Confirm the opcode is plain LI
+    opcode = (words[0] >> 26) & 0x3F
+    assert opcode == Op.LI, f"Expected LI opcode, got {opcode}"
 
 
 # ===================================================================

@@ -332,6 +332,12 @@ class Emulator:
             # imm16 is sign-extended to 64 bits
             t.regs[inst.rd] = inst.imm16 & WORD_MASK
 
+        # ---- LI32 (load 32-bit immediate from next word) ----
+        elif op == Op.LI32:
+            imm32 = self.mem.load_u32(next_pc)
+            t.regs[inst.rd] = imm32 & WORD_MASK
+            next_pc += 4  # skip the immediate word
+
         # ---- LUI (load upper immediate) ----
         elif op == Op.LUI:
             # Load imm16 into bits 31:16, zero other bits

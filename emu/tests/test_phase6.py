@@ -134,9 +134,9 @@ def test_asm_equ_directive():
         HALT
     """
     emu = _asm_and_run(source)
-    # LI sign-extends 16-bit: 0xDEAD = 57005, but as signed 16-bit = -8531
-    expected = (-8531) & WORD_MASK
-    assert emu.thread.regs[5] == expected, f"got {emu.thread.regs[5]:#x}"
+    # 0xDEAD exceeds signed-16 range → LI auto-expands to LI32,
+    # loading the exact 32-bit value.
+    assert emu.thread.regs[5] == 0xDEAD, f"got {emu.thread.regs[5]:#x}"
 
 
 @test("asm_nop", batch="phase6_basic")

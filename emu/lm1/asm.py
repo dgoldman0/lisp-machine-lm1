@@ -178,8 +178,20 @@ class Assembler:
                 pc = self._eval_expr(line.args[0], line.line_no)
             elif mn == '.SPACE':
                 pc += self._eval_expr(line.args[0], line.line_no)
+            elif mn == 'LI32':
+                pc += 8  # always two words
+            elif mn == 'LI':
+                # Check if value fits in 16-bit signed immediate
+                try:
+                    imm = self._eval_expr(line.args[1], line.line_no)
+                    if -32768 <= imm <= 32767:
+                        pc += 4
+                    else:
+                        pc += 8  # auto-expand to LI32
+                except Exception:
+                    pc += 4  # assume fits (forward ref label)
             else:
-                pc += 4  # all instructions are 4 bytes
+                pc += 4  # all other instructions are 4 bytes
 
     # -- Pass 2: emit code --
 
@@ -229,9 +241,15 @@ class Assembler:
                     self.output.extend(b'\x00' * n)
                     pc += n
                 else:
-                    word = self._assemble_instruction(mn, line.args, pc, line.line_no)
-                    self._emit32(word)
-                    pc += 4
+                    result = self._assemble_instruction(mn, line.args, pc, line.line_no)
+                    if isinstance(result, tuple):
+                        # Two-word instruction (e.g., LI32)
+                        self._emit32(result[0])
+                        self._emit32(result[1])
+                        pc += 8
+                    else:
+                        self._emit32(result)
+                        pc += 4
             except AsmError:
                 raise
             except Exception as e:
@@ -443,7 +461,15 @@ class Assembler:
         if mn == 'LI':
             rd = self._reg(args[0], ln)
             imm = self._eval_expr(args[1], ln)
-            return encode_i(Op.LI, rd, 0, imm)
+            if -32768 <= imm <= 32767:
+                return encode_i(Op.LI, rd, 0, imm)
+            else:
+                # Auto-expand to LI32 (two-word instruction)
+                return (encode_i(Op.LI32, rd, 0, 0), imm & 0xFFFF_FFFF)
+        if mn == 'LI32':
+            rd = self._reg(args[0], ln)
+            imm = self._eval_expr(args[1], ln)
+            return (encode_i(Op.LI32, rd, 0, 0), imm & 0xFFFF_FFFF)
         if mn == 'LUI':
             rd = self._reg(args[0], ln)
             imm = self._eval_expr(args[1], ln)
