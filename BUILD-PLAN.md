@@ -204,6 +204,83 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [ ] Boots via BIOS, runs as OS image
 - [ ] Test: native desktop boots, draws a window, handles click
 
+### Phase 15: Live Development Environment
+**Goal:** Edit code in a crystallite, eval it, and the running system changes — while you watch.
+**Status:** Not started. Can prototype on the Python-hosted desktop before going fully native.
+
+- [ ] Editor crystallite: buffer-based text editor with cursor, insert/delete, scroll
+- [ ] Lisp syntax highlighting in the editor (paren matching, keyword coloring)
+- [ ] Eval-region: select code in editor, eval it, result appears in a REPL pane
+- [ ] Hot-patch: redefine a function and IC entries invalidate — next call picks up new definition
+- [ ] Condition/restart debugger crystallite: error pops a window showing the stack, bindings, restarts — pick a restart, execution resumes
+- [ ] **Killer demo:** open editor, modify `_draw_window` (or the native equivalent), eval, title bars change appearance in real time while the desktop is running
+- [ ] Test: redefine a function, call it, verify new behavior; trigger an error, verify debugger crystallite opens
+
+### Phase 16: Object System (CLOS on Hardware)
+**Goal:** Full object system where `defclass` maps to shapes and `defgeneric`/`defmethod` dispatch through the IC.
+**Status:** Not started. Phase 4 (IC + shapes) provides the hardware foundation.
+
+- [ ] `defclass`: creates a shape, allocates slot layout, inheritance chain
+- [ ] `make-instance`: ALLOCV with shape header, slot initialization
+- [ ] Slot access: `slot-value` / `(with-slots ...)` compiled to indexed LD/ST
+- [ ] `defgeneric` / `defmethod`: method table keyed by shape, installed into IC
+- [ ] Multiple dispatch: discriminate on 1st arg shape (single dispatch first, extend later)
+- [ ] Method combination: `:before`, `:after`, `:around` wrappers
+- [ ] `change-class`: reshape an object live (update shape, migrate slots)
+- [ ] Test: define a class hierarchy, dispatch methods, verify IC hits, change-class
+
+### Phase 17: Condition System
+**Goal:** Restartable errors — signal a condition, handle it without unwinding, pick a restart.
+**Status:** Not started.
+
+- [ ] `define-condition`: condition types as classes (builds on Phase 16)
+- [ ] `signal` / `error` / `warn`: walk handler chain, find matching handler
+- [ ] `handler-bind`: establish handlers (non-unwinding — stack stays live)
+- [ ] `handler-case`: establish handlers (unwinding — like try/catch)
+- [ ] `restart-bind` / `invoke-restart`: offer recovery strategies
+- [ ] Standard restarts: `abort`, `continue`, `use-value`, `store-value`
+- [ ] Integration with debugger crystallite (Phase 15): interactive restart selection
+- [ ] Test: signal a condition, handle it, invoke a restart, verify execution resumes correctly
+
+### Phase 18: Actor Runtime & Parallel Primitives
+**Goal:** Erlang-style lightweight processes on tiles. Parallel map/reduce over cons structures.
+**Status:** Not started. Phase 5 (SEND/RECV/multi-tile) provides the hardware foundation.
+
+- [ ] Per-tile process scheduler: run queue of lightweight processes, preemptive yield on GC or message
+- [ ] `spawn`: create a process on a tile, returns a process ID (tagged value)
+- [ ] `send` / `receive` (Lisp-level): pattern-matching message receive with timeout
+- [ ] Process linking and monitors: "if that process dies, notify me"
+- [ ] Supervision trees: restart strategies (one-for-one, one-for-all)
+- [ ] `pmap`: parallel map — distribute list elements across tiles, collect results via messages
+- [ ] `pfold`: parallel reduce with associative combiner
+- [ ] `future` / `promise`: spawn computation, block on result
+- [ ] Load balancing: work-stealing or round-robin tile assignment
+- [ ] Test: spawn 100 processes across 4 tiles, pmap a function, verify results
+
+### Phase 19: Parallel Lisp Compiler (Self-Hosting)
+**Goal:** The cross-compiler rewritten in Lisp, running on the LM-1, compiling itself.
+**Status:** Not started. Depends on Phases 13 (compiler extensions), 16 (object system), 18 (actors).
+
+- [ ] Port the parser (`parse`) to native Lisp
+- [ ] Port expression compiler to native Lisp (emit assembly text or direct code gen)
+- [ ] Assembler in Lisp (or direct machine code emission)
+- [ ] Parallel compilation: each `defun` compiles on a separate tile via `spawn`
+- [ ] Bootstrap test: compiler compiles itself, output matches
+- [ ] Benchmark: compile a large program, measure speedup from N tiles vs 1
+
+### Phase 20: Application Showcase
+**Goal:** Real applications that demonstrate what a modern Lisp machine with 64 tiles can do.
+**Status:** Not started. Pick from the menu below based on interest.
+
+- [ ] **Symbolic algebra system** — differentiation, simplification, polynomial arithmetic over cons-cell expression trees. Parallel simplification across tiles.
+- [ ] **Parallel ray tracer** — tiles own screen regions, trace independently, shared scene graph in old-gen. Real-time preview in a crystallite window.
+- [ ] **Actor-based chat system** — actors on different tiles (or eventually different machines) sending messages. Chat UI as a crystallite.
+- [ ] **Genetic programming engine** — evolve Lisp programs. Each tile runs a population. Fitness = native execution. Migration via SEND. The machine breeds programs.
+- [ ] **Lisp-scripted game** — tile for physics, tile for AI, tile for rendering, message-passing between them. Game logic is hot-editable via the live IDE (Phase 15).
+- [ ] **Generative art** — parallel L-systems / fractal computation, results stream into VDI framebuffer, interactive parameter tweaking from REPL.
+- [ ] **Music synthesizer** — tiles as oscillators/filters, message-passing as signal routing, patch definitions as Lisp data, waveform visualizer crystallite.
+- [ ] **Distributed key-value store** — each tile owns a partition, queries fan out as messages, transactions via CAS.TAGGED.
+
 ---
 
 ## Test Summary

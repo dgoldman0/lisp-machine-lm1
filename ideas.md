@@ -85,3 +85,15 @@ Collected during development. Not committed to — just possibilities.
 - **Desktop icons:** Spatial icons on the desktop background, launchable with double-click.
 - **Drag and drop:** Between windows. The scrap system mediates the data transfer.
 - **Multi-tile desktop:** Different tiles could run different crystallites. Message-passing between UI and computation tiles.
+
+## Applications (see BUILD-PLAN Phases 19-20)
+
+These are the real payoff — things that use the hardware for actual work:
+
+- **Self-hosting compiler:** The cross-compiler rewritten in Lisp, running on the machine, compiling itself. Parallel compilation across tiles. The ultimate bootstrap test.
+- **Symbolic algebra:** Not a toy CAS — a system that can differentiate, integrate, and simplify real expressions. The tagged-word ISA was literally built for tree-walking over symbolic data.
+- **Parallel ray tracer:** Each tile traces a screen region. Demonstrates that per-tile GC doesn't cause pauses in other tiles. Interactive — change scene from REPL, see result.
+- **Actor chat system:** Actors as the natural concurrency model. Supervision trees, message delivery guarantees, fault tolerance. Could span multiple emulated machines once networking exists.
+- **GP engine:** The machine breeding Lisp programs is peak "Lisp machine." Fitness evaluation runs native code, not interpreted.
+- **Game with hot-editable logic:** The live IDE (Phase 15) shines here — change enemy AI code while the game is running, see it take effect next frame.
+- **Benchmark suite:** Compare LM-1 Lisp against CPython, SBCL, Erlang BEAM on equivalent workloads. Especially interesting for GC-heavy symbolic workloads and actor message throughput.
