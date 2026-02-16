@@ -8,7 +8,7 @@ headless using the VDI framebuffer.
 
 from lm1.testing.harness import test
 from lm1.vdi import (
-    VDI, CHAR_W, CHAR_H,
+    VDI,
     EVT_NONE, EVT_KEY_DOWN, EVT_KEY_UP,
     EVT_MOUSE_MOVE, EVT_MOUSE_DOWN, EVT_MOUSE_UP, EVT_QUIT,
 )

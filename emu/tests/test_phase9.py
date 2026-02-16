@@ -24,7 +24,6 @@ from lm1.vdi import (
     VDI_DRAW_LINE, VDI_GET_MODE, VDI_SCROLL, VDI_PRESENT,
     VDI_READ_EVENT, VDI_GRAD_RECT, VDI_SHADOW_RECT,
     EVT_NONE, EVT_KEY_DOWN, EVT_QUIT,
-    CHAR_W, CHAR_H,
     GRAD_VERTICAL, GRAD_HORIZONTAL,
     rgb, unpack_rgb, lerp_color, alpha_blend,
 )
@@ -120,37 +119,39 @@ def test_vdi_draw_line():
 def test_vdi_draw_char():
     """draw_char renders a character with fg/bg colors."""
     vdi = VDI(width=64, height=64, headless=True)
-    # Draw 'A' (0x41) at (0,0) with fg=15, bg=1
-    vdi.draw_char(0, 0, ord('A'), 15, 1)
-    # The character cell is 8x16 — check some pixels are fg or bg
-    found_fg = False
-    found_bg = False
-    for y in range(CHAR_H):
-        for x in range(CHAR_W):
+    cw = vdi.font.char_w
+    ch = vdi.font.char_h
+    # Draw 'A' (0x41) at (0,0) with fg=0xFFFFFF, bg=0x010101
+    vdi.draw_char(0, 0, ord('A'), 0xFFFFFF, 0x010101)
+    # The character cell uses the font dimensions — check some pixels are
+    # near-fg or near-bg (anti-aliased font has intermediate values)
+    found_bright = False
+    found_dark = False
+    for y in range(ch):
+        for x in range(cw):
             px = vdi.read_pixel(x, y)
-            if px == 15:
-                found_fg = True
-            elif px == 1:
-                found_bg = True
-            else:
-                assert False, f"Unexpected pixel value {px} at ({x},{y})"
-    assert found_fg, "Character 'A' should have foreground pixels"
-    assert found_bg, "Character 'A' should have background pixels"
+            lum = ((px >> 16) & 0xFF) + ((px >> 8) & 0xFF) + (px & 0xFF)
+            if lum > 600:   # near-white
+                found_bright = True
+            elif lum < 100:  # near-black
+                found_dark = True
+    assert found_bright, "Character 'A' should have bright (fg) pixels"
+    assert found_dark, "Character 'A' should have dark (bg) pixels"
 
 
 @test("vdi_draw_string", batch="phase9_vdi_unit")
 def test_vdi_draw_string():
     """draw_string renders multiple characters."""
-    vdi = VDI(width=128, height=32, headless=True)
-    vdi.draw_string(0, 0, "Hi", 15, 0)
-    # Check that both character cells have some foreground pixels
-    # First char at (0..7, 0..15)
-    h_pixels = sum(1 for x in range(CHAR_W) for y in range(CHAR_H)
-                   if vdi.read_pixel(x, y) == 15)
+    vdi = VDI(width=128, height=64, headless=True)
+    cw = vdi.font.char_w
+    ch = vdi.font.char_h
+    vdi.draw_string(0, 0, "Hi", 0xFFFFFF, 0)
+    # Check that both character cells have some bright (foreground) pixels
+    h_pixels = sum(1 for x in range(cw) for y in range(ch)
+                   if vdi.read_pixel(x, y) > 0x808080)
     assert h_pixels > 0, "'H' should have foreground pixels"
-    # Second char at (8..15, 0..15)
-    i_pixels = sum(1 for x in range(CHAR_W, 2 * CHAR_W) for y in range(CHAR_H)
-                   if vdi.read_pixel(x, y) == 15)
+    i_pixels = sum(1 for x in range(cw, 2 * cw) for y in range(ch)
+                   if vdi.read_pixel(x, y) > 0x808080)
     assert i_pixels > 0, "'i' should have foreground pixels"
 
 
@@ -372,9 +373,11 @@ _start:
     HALT
 """
     vdi, emu, out = _asm_run(asm)
-    # Some pixels in the 8x16 cell should be white (15)
-    fg_count = sum(1 for y in range(CHAR_H) for x in range(CHAR_W)
-                   if vdi.read_pixel(x, y) == 15)
+    # Some pixels in the font cell should be bright (fg=15 = 0x00000F)
+    cw = vdi.font.char_w
+    ch = vdi.font.char_h
+    fg_count = sum(1 for y in range(ch) for x in range(cw)
+                   if vdi.read_pixel(x, y) > 0)
     assert fg_count > 0, "Character 'X' should have foreground pixels"
 
 
@@ -410,10 +413,12 @@ _start:
         t.pc = 0
     emu.run(max_instructions=5000)
     # Check both character cells have foreground pixels
-    a_fg = sum(1 for y in range(CHAR_H) for x in range(CHAR_W)
-               if vdi.read_pixel(x, y) == 15)
-    b_fg = sum(1 for y in range(CHAR_H) for x in range(CHAR_W, 2 * CHAR_W)
-               if vdi.read_pixel(x, y) == 15)
+    cw = vdi.font.char_w
+    ch = vdi.font.char_h
+    a_fg = sum(1 for y in range(ch) for x in range(cw)
+               if vdi.read_pixel(x, y) > 0)
+    b_fg = sum(1 for y in range(ch) for x in range(cw, 2 * cw)
+               if vdi.read_pixel(x, y) > 0)
     assert a_fg > 0, "'A' should have foreground pixels"
     assert b_fg > 0, "'B' should have foreground pixels"
 

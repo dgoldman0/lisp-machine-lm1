@@ -18,7 +18,7 @@ from typing import Callable, Optional
 import time
 
 from .vdi import (
-    VDI, CHAR_W, CHAR_H, GRAD_VERTICAL,
+    VDI, GRAD_VERTICAL, BG_TRANSPARENT,
     EVT_NONE, EVT_KEY_DOWN, EVT_KEY_UP,
     EVT_MOUSE_MOVE, EVT_MOUSE_DOWN, EVT_MOUSE_UP, EVT_QUIT, EVT_TIMER,
 )
@@ -72,18 +72,18 @@ WIN_FULLABLE    = 0x08
 WIN_HAS_VSCROLL = 0x10
 WIN_HAS_HSCROLL = 0x20
 
-TITLE_BAR_H = 20
+TITLE_BAR_H = 26
 BORDER_W    = 1
-MENU_BAR_H  = 20
-MIN_WIN_W   = 80
-MIN_WIN_H   = 60
+MENU_BAR_H  = 26
+MIN_WIN_W   = 100
+MIN_WIN_H   = 80
 
 # Close button
-CLOSE_BTN_W = 16
-CLOSE_BTN_H = 14
+CLOSE_BTN_W = 18
+CLOSE_BTN_H = 16
 
 # Resize grip
-GRIP_SIZE = 12
+GRIP_SIZE = 14
 
 
 @dataclass
@@ -333,9 +333,12 @@ class AES:
                            Colors.BLACK)
 
         # Title text (centered horizontally, vertically centered in title bar)
-        text_x = win.x + (win.w - len(win.title) * CHAR_W) // 2
-        text_y = win.y + (TITLE_BAR_H - CHAR_H) // 2
-        vdi.draw_string(text_x, text_y, win.title, Colors.TITLE_TEXT, title_bg)
+        cw_f = vdi.font.char_w
+        ch_f = vdi.font.char_h
+        text_x = win.x + (win.w - len(win.title) * cw_f) // 2
+        text_y = win.y + (TITLE_BAR_H - ch_f) // 2
+        vdi.draw_string(text_x, text_y, win.title,
+                        Colors.TITLE_TEXT, BG_TRANSPARENT)
 
         # Client area background
         cx, cy, cw, ch = win.client_rect()
@@ -371,15 +374,17 @@ class AES:
         # Draw menu labels
         x = 8
         menus = self._get_active_menus()
+        cw_f = vdi.font.char_w
+        ch_f = vdi.font.char_h
         for i, menu in enumerate(menus):
-            label_w = len(menu.label) * CHAR_W + 12
+            label_w = len(menu.label) * cw_f + 12
             if i == self._menu_open:
                 vdi.fill_rect(x - 4, 0, label_w, MENU_BAR_H - 1,
                                Colors.MENU_HIGHLIGHT)
-                vdi.draw_string(x, (MENU_BAR_H - CHAR_H) // 2, menu.label,
+                vdi.draw_string(x, (MENU_BAR_H - ch_f) // 2, menu.label,
                                  Colors.MENU_HI_TEXT, Colors.MENU_HIGHLIGHT)
             else:
-                vdi.draw_string(x, (MENU_BAR_H - CHAR_H) // 2, menu.label,
+                vdi.draw_string(x, (MENU_BAR_H - ch_f) // 2, menu.label,
                                  Colors.MENU_BAR_TEXT, Colors.MENU_BAR_BG)
             x += label_w
 
@@ -394,16 +399,19 @@ class AES:
         if not menu.items:
             return
 
+        cw_f = vdi.font.char_w
+        ch_f = vdi.font.char_h
+
         # Calculate dropdown position
         x = 8
         for i in range(self._menu_open):
-            x += len(menus[i].label) * CHAR_W + 12
+            x += len(menus[i].label) * cw_f + 12
 
         # Dropdown dimensions
         max_label_w = max(len(item.label) for item in menu.items
                           if not item.separator) if menu.items else 8
-        drop_w = max_label_w * CHAR_W + 16
-        drop_h = sum(8 if item.separator else CHAR_H + 4
+        drop_w = max_label_w * cw_f + 16
+        drop_h = sum(8 if item.separator else ch_f + 4
                      for item in menu.items) + 4
         drop_x = x - 4
         drop_y = MENU_BAR_H
@@ -431,7 +439,7 @@ class AES:
                 iy += 8
             else:
                 if idx == self._menu_highlight:
-                    vdi.fill_rect(drop_x + 1, iy, drop_w - 2, CHAR_H + 4,
+                    vdi.fill_rect(drop_x + 1, iy, drop_w - 2, ch_f + 4,
                                    Colors.MENU_HIGHLIGHT)
                     vdi.draw_string(drop_x + 8, iy + 2, item.label,
                                      Colors.MENU_HI_TEXT, Colors.MENU_HIGHLIGHT)
@@ -439,7 +447,7 @@ class AES:
                     fg = Colors.MENU_BAR_TEXT if item.enabled else Colors.DARK_GRAY
                     vdi.draw_string(drop_x + 8, iy + 2, item.label,
                                      fg, Colors.WHITE)
-                iy += CHAR_H + 4
+                iy += ch_f + 4
 
     def _get_active_menus(self) -> list[Menu]:
         """Return the current menu bar items (system + focused app menus)."""
@@ -454,8 +462,9 @@ class AES:
             return -1
         x = 8
         menus = self._get_active_menus()
+        cw_f = self.vdi.font.char_w
         for i, menu in enumerate(menus):
-            label_w = len(menu.label) * CHAR_W + 12
+            label_w = len(menu.label) * cw_f + 12
             if x - 4 <= sx < x - 4 + label_w:
                 return i
             x += label_w
@@ -468,13 +477,15 @@ class AES:
             return -1
 
         menu = menus[self._menu_open]
+        cw_f = self.vdi.font.char_w
+        ch_f = self.vdi.font.char_h
         x = 8
         for i in range(self._menu_open):
-            x += len(menus[i].label) * CHAR_W + 12
+            x += len(menus[i].label) * cw_f + 12
 
         max_label_w = max(len(item.label) for item in menu.items
                           if not item.separator) if menu.items else 8
-        drop_w = max_label_w * CHAR_W + 16
+        drop_w = max_label_w * cw_f + 16
         drop_x = x - 4
         drop_y = MENU_BAR_H
 
@@ -483,7 +494,7 @@ class AES:
 
         iy = drop_y + 2
         for idx, item in enumerate(menu.items):
-            item_h = 8 if item.separator else CHAR_H + 4
+            item_h = 8 if item.separator else ch_f + 4
             if iy <= sy < iy + item_h:
                 if not item.separator and item.enabled:
                     return idx
@@ -648,6 +659,8 @@ class AES:
 
         def draw_about(vdi: VDI, win: Window):
             cx, cy, cw, ch = win.client_rect()
+            cw_f = vdi.font.char_w
+            ch_f = vdi.font.char_h
             lines = [
                 "Crystal Desktop v1.0",
                 "",
@@ -657,8 +670,8 @@ class AES:
                 "Click to close",
             ]
             for i, line in enumerate(lines):
-                tx = cx + (cw - len(line) * CHAR_W) // 2
-                ty = cy + 8 + i * (CHAR_H + 2)
+                tx = cx + (cw - len(line) * cw_f) // 2
+                ty = cy + 8 + i * (ch_f + 2)
                 vdi.draw_string(tx, ty, line, Colors.BLACK, Colors.WHITE)
 
         win = self.create_window("About", x, y, w, h,
@@ -733,26 +746,28 @@ class TerminalCrystallite:
 
     def _redraw(self, vdi: VDI, win: Window) -> None:
         cx, cy, cw, ch = win.client_rect()
+        cw_f = vdi.font.char_w
+        ch_f = vdi.font.char_h
         # Fill background
         vdi.fill_rect(cx, cy, cw, ch, Colors.BLACK)
 
         # Calculate visible lines
-        max_lines = ch // CHAR_H
+        max_lines = ch // ch_f
         display_lines = self.lines[-(max_lines - 1):]
 
         # Draw history
         for i, line in enumerate(display_lines):
-            vdi.draw_string(cx + 2, cy + 2 + i * CHAR_H,
-                             line[:cw // CHAR_W],
+            vdi.draw_string(cx + 2, cy + 2 + i * ch_f,
+                             line[:cw // cw_f],
                              Colors.GREEN, Colors.BLACK)
 
         # Draw current input line with prompt
-        input_y = cy + 2 + len(display_lines) * CHAR_H
+        input_y = cy + 2 + len(display_lines) * ch_f
         input_line = self.prompt + self.input_buf
         if self.cursor_on:
             input_line += "_"
         vdi.draw_string(cx + 2, input_y,
-                         input_line[:cw // CHAR_W],
+                         input_line[:cw // cw_f],
                          Colors.GREEN, Colors.BLACK)
 
     def _on_key(self, win: Window, key: int, mod: int) -> None:
@@ -919,7 +934,7 @@ class ClockCrystallite:
         self.aes = aes
         self._last_time = ""
         self.win = aes.create_window(
-            "Clock", x, y, 160, 60,
+            "Clock", x, y, 180, 80,
             flags=WIN_CLOSEABLE | WIN_MOVEABLE,
             on_redraw=self._redraw,
         )
@@ -929,15 +944,17 @@ class ClockCrystallite:
 
     def _redraw(self, vdi: VDI, win: Window) -> None:
         cx, cy, cw, ch = win.client_rect()
+        cw_f = vdi.font.char_w
+        ch_f = vdi.font.char_h
         vdi.fill_rect(cx, cy, cw, ch, Colors.BLACK)
         time_str = time.strftime("%H:%M:%S")
         date_str = time.strftime("%Y-%m-%d")
         # Big time display
-        tx = cx + (cw - len(time_str) * CHAR_W) // 2
+        tx = cx + (cw - len(time_str) * cw_f) // 2
         vdi.draw_string(tx, cy + 4, time_str, Colors.GREEN, Colors.BLACK)
         # Date below
-        dx = cx + (cw - len(date_str) * CHAR_W) // 2
-        vdi.draw_string(dx, cy + 4 + CHAR_H + 2, date_str,
+        dx = cx + (cw - len(date_str) * cw_f) // 2
+        vdi.draw_string(dx, cy + 4 + ch_f + 2, date_str,
                          Colors.CYAN, Colors.BLACK)
         self._last_time = time_str
 
@@ -967,11 +984,11 @@ class CalculatorCrystallite:
             ['1', '2', '3', '-'],
             ['0', 'C', '=', '+'],
         ]
-        btn_w = 36
-        btn_h = 28
+        btn_w = 40
+        btn_h = 32
         pad = 4
         w = 4 * btn_w + 5 * pad + 2 * BORDER_W
-        h = TITLE_BAR_H + 30 + 4 * btn_h + 5 * pad + BORDER_W
+        h = TITLE_BAR_H + 34 + 4 * btn_h + 5 * pad + BORDER_W
 
         self.win = aes.create_window(
             "Calculator", x, y, w, h,
@@ -987,16 +1004,18 @@ class CalculatorCrystallite:
 
     def _redraw(self, vdi: VDI, win: Window) -> None:
         cx, cy, cw, ch = win.client_rect()
+        cw_f = vdi.font.char_w
+        ch_f = vdi.font.char_h
 
         # Display field
-        vdi.fill_rect(cx + 4, cy + 4, cw - 8, 22, Colors.BLACK)
-        display_text = self.display[-cw // CHAR_W:]
-        tx = cx + cw - 6 - len(display_text) * CHAR_W
-        vdi.draw_string(tx, cy + 7, display_text, Colors.GREEN, Colors.BLACK)
+        vdi.fill_rect(cx + 4, cy + 4, cw - 8, 24, Colors.BLACK)
+        display_text = self.display[-cw // cw_f:]
+        tx = cx + cw - 6 - len(display_text) * cw_f
+        vdi.draw_string(tx, cy + 5, display_text, Colors.GREEN, Colors.BLACK)
 
         # Buttons
-        btn_w, btn_h, pad = 36, 28, 4
-        by_start = cy + 30
+        btn_w, btn_h, pad = 40, 32, 4
+        by_start = cy + 34
         for row_idx, row in enumerate(self._buttons):
             for col_idx, label in enumerate(row):
                 bx = cx + pad + col_idx * (btn_w + pad)
@@ -1010,14 +1029,14 @@ class CalculatorCrystallite:
                 vdi.draw_line(bx, by + btn_h - 1,
                                bx + btn_w - 1, by + btn_h - 1, Colors.DARK_GRAY)
                 # Label
-                lx = bx + (btn_w - len(label) * CHAR_W) // 2
-                ly = by + (btn_h - CHAR_H) // 2
+                lx = bx + (btn_w - len(label) * cw_f) // 2
+                ly = by + (btn_h - ch_f) // 2
                 vdi.draw_string(lx, ly, label, Colors.BUTTON_TEXT, Colors.BUTTON_BG)
 
     def _on_click(self, win: Window, cx: int, cy: int, button: int) -> None:
         """Handle click in calculator content area."""
-        btn_w, btn_h, pad = 36, 28, 4
-        by_start = 30
+        btn_w, btn_h, pad = 40, 32, 4
+        by_start = 34
         for row_idx, row in enumerate(self._buttons):
             for col_idx, label in enumerate(row):
                 bx = pad + col_idx * (btn_w + pad)

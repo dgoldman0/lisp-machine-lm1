@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from .vdi import (
-    VDI, CHAR_W, CHAR_H,
+    VDI,
     EVT_NONE, EVT_KEY_DOWN, EVT_KEY_UP,
     EVT_MOUSE_MOVE, EVT_MOUSE_DOWN, EVT_MOUSE_UP, EVT_QUIT,
 )

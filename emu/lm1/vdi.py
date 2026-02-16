@@ -39,6 +39,8 @@ from __future__ import annotations
 import array
 from typing import Optional
 
+from lm1.font import Font, get_default_font, load_font
+
 
 # VDI function codes
 VDI_SET_MODE     = 0
@@ -253,8 +255,13 @@ def _get_font() -> list[bytes]:
     return _FONT
 
 
+# Legacy constants — prefer vdi.font.char_w / vdi.font.char_h
 CHAR_W = 8
 CHAR_H = 16
+
+# Sentinel: pass as bg to draw text without filling background pixels.
+# The glyph is alpha-blended over whatever is already in the framebuffer.
+BG_TRANSPARENT = -1
 
 # Gradient directions for VDI_GRAD_RECT
 GRAD_HORIZONTAL = 0
@@ -283,6 +290,9 @@ class VDI:
         self.cursor_x = 0
         self.cursor_y = 0
         self.cursor_visible = False
+
+        # Font
+        self.font: Font = get_default_font()
 
         # Event queue
         self._events: list[tuple[int, int, int]] = []
@@ -452,41 +462,67 @@ class VDI:
         elif dx < 0:
             self.fill_rect(max(x, x + w + dx), y, min(-dx, w), h, 0)
 
-    def draw_char(self, x: int, y: int, ch: int, fg: int, bg: int) -> None:
-        """Draw a single character using the built-in 8x16 font."""
-        font = _get_font()
-        if ch < 0 or ch >= len(font):
-            ch = 0
-        glyph = font[ch]
-        fg = fg & 0xFFFFFF
-        bg = bg & 0xFFFFFF
+    def draw_char(self, x: int, y: int, ch: int, fg: int, bg: int,
+                  *, font: Font | None = None) -> None:
+        """Draw a single character using the current font.
 
-        for row in range(CHAR_H):
-            if y + row < 0 or y + row >= self.height:
+        If *bg* is ``BG_TRANSPARENT`` (-1), glyph pixels are alpha-blended
+        over the existing framebuffer contents (no background fill).
+        Otherwise the background is filled with *bg* colour.
+        """
+        fnt = font or self.font
+        glyph = fnt.get_glyph(ch)
+        cw, ch_h = fnt.char_w, fnt.char_h
+        fg = fg & 0xFFFFFF
+        transparent = (bg == BG_TRANSPARENT)
+        if not transparent:
+            bg = bg & 0xFFFFFF
+
+        fb = self.fb
+        w = self.width
+        h = self.height
+
+        for row in range(ch_h):
+            py = y + row
+            if py < 0 or py >= h:
                 continue
-            bits = glyph[row]
-            base = (y + row) * self.width
-            for col in range(CHAR_W):
+            base = py * w
+            row_off = row * cw
+            for col in range(cw):
                 px = x + col
-                if 0 <= px < self.width:
-                    if bits & (0x80 >> col):
-                        self.fb[base + px] = fg
-                    else:
-                        self.fb[base + px] = bg
+                if px < 0 or px >= w:
+                    continue
+                alpha = glyph[row_off + col]
+                idx = base + px
+                if alpha >= 255:
+                    fb[idx] = fg
+                elif alpha == 0:
+                    if not transparent:
+                        fb[idx] = bg
+                else:
+                    # Alpha blend
+                    bg_px = fb[idx] if transparent else bg
+                    fb[idx] = alpha_blend(fg, bg_px, alpha)
         self._dirty = True
 
-    def draw_string(self, x: int, y: int, text: str, fg: int, bg: int) -> None:
+    def draw_string(self, x: int, y: int, text: str, fg: int, bg: int,
+                    *, font: Font | None = None) -> None:
         """Draw a string of characters."""
+        fnt = font or self.font
+        cw = fnt.char_w
         for i, ch in enumerate(text):
-            self.draw_char(x + i * CHAR_W, y, ord(ch), fg, bg)
+            self.draw_char(x + i * cw, y, ord(ch), fg, bg, font=fnt)
 
     def draw_string_from_mem(self, x: int, y: int,
                               mem_read_fn, addr: int, length: int,
-                              fg: int, bg: int) -> None:
+                              fg: int, bg: int,
+                              *, font: Font | None = None) -> None:
         """Draw a string from emulator memory."""
+        fnt = font or self.font
+        cw = fnt.char_w
         for i in range(length):
             ch = mem_read_fn(addr + i)
-            self.draw_char(x + i * CHAR_W, y, ch, fg, bg)
+            self.draw_char(x + i * cw, y, ch, fg, bg, font=fnt)
 
     def set_cursor(self, x: int, y: int, visible: bool) -> None:
         """Set hardware cursor position and visibility."""
