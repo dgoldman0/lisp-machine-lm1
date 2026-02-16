@@ -62,6 +62,13 @@ class Emulator:
     DEFAULT_NURSERY_BASE  = 0x0003_0000   # 192 KiB offset
     DEFAULT_NURSERY_SIZE  = 0x0001_0000   # 64 KiB
 
+    # Default old-gen: 256 KiB starting at 512 KiB offset
+    DEFAULT_OLDGEN_BASE   = 0x0008_0000   # 512 KiB offset
+    DEFAULT_OLDGEN_SIZE   = 0x0004_0000   # 256 KiB
+
+    # Card table: one byte per 256-byte card (covers nursery + old-gen)
+    CARD_SIZE = 256  # bytes per card
+
     def __init__(
         self,
         mem_size: int = 4 * 1024 * 1024,  # 4 MiB default
@@ -71,6 +78,8 @@ class Emulator:
         stdout: TextIO | None = None,
         nursery_base: int | None = None,
         nursery_size: int | None = None,
+        oldgen_base: int | None = None,
+        oldgen_size: int | None = None,
     ):
         self.mem = Memory(mem_size)
         self.thread = ThreadContext()
@@ -87,6 +96,20 @@ class Emulator:
         # NL = nursery limit (first address past the nursery)
         self.thread.np = self.nursery_base
         self.thread.nl = self.nursery_base + self.nursery_size
+
+        # Old-gen region (promotion target for surviving nursery objects)
+        self.oldgen_base = oldgen_base if oldgen_base is not None else self.DEFAULT_OLDGEN_BASE
+        self.oldgen_size = oldgen_size if oldgen_size is not None else self.DEFAULT_OLDGEN_SIZE
+        self.oldgen_ptr = self.oldgen_base  # bump pointer into old-gen
+
+        # Card table: one byte per CARD_SIZE bytes of heap memory.
+        # Covers the entire memory space.  A card is "dirty" (non-zero) when
+        # a store-with-barrier writes a nursery ref into an old-gen object.
+        self.card_table_size = mem_size // self.CARD_SIZE
+        self.card_table = bytearray(self.card_table_size)
+
+        # GC statistics
+        self.gc_count = 0
 
         # Install default header templates (index 0 = cons)
         self._init_header_templates()
@@ -131,8 +154,37 @@ class Emulator:
             # Advance PC (may be overwritten by branches)
             next_pc = t.pc + 4
 
-            # Execute
-            next_pc = self._execute(inst, next_pc)
+            try:
+                # Execute
+                next_pc = self._execute(inst, next_pc)
+            except LM1Trap as trap:
+                # Phase 3: handle traps
+
+                # Special case: nursery overflow → run GC at emulator level
+                if trap.code == TRAP_NURSERY_OVERFLOW:
+                    self._gc_collect()
+                    # Retry the faulting instruction (don't advance PC)
+                    next_pc = t.pc
+                # Dispatch through trap table if installed
+                elif t.trap_table_base != 0 and trap.code < 0x80:
+                    # Save state for ERET — save PC of *faulting* instruction.
+                    # For software TRAP: handler should ERET to trap_pc+4.
+                    # For faults (NURSERY_OVERFLOW etc): ERET retries the insn.
+                    t.trap_pc = t.pc
+                    t.trap_cause = trap.code
+                    t.in_trap = True
+                    # Look up handler address: trap_table[code] is a 64-bit
+                    # word containing the handler PC
+                    handler_addr = mem.load_word(
+                        t.trap_table_base + trap.code * 8
+                    )
+                    if handler_addr == 0:
+                        # No handler installed for this trap — fatal
+                        raise
+                    next_pc = handler_addr
+                else:
+                    # Emulator traps (>= 0x80) or no trap table — fatal
+                    raise
 
             t.pc = next_pc
             t.cycle_count += 1
@@ -265,14 +317,32 @@ class Emulator:
 
         # ---- PUSH / POP ----
         elif op == Op.PUSH_POP:
-            func = (inst.imm16 >> 14) & 3 if inst.imm16 != 0 else inst.func
-            # Simple encoding: rd specifies register, func selects push/pop
             match inst.func:
                 case 0:  # PUSH
                     t.sp = (t.sp - 8) & WORD_MASK
                     self.mem.store_word(t.sp, t.regs[inst.rd])
                 case 1:  # POP
                     t.regs[inst.rd] = self.mem.load_word(t.sp)
+                    t.sp = (t.sp + 8) & WORD_MASK
+
+        # ---- PUSH.MULTI (Format I: rd=bank, imm16=mask) ----
+        elif op == Op.PUSH_MULTI:
+            bank = inst.rd
+            mask = inst.imm16 & 0xFFFF
+            base_reg = bank * 16
+            for i in range(16):
+                if mask & (1 << i):
+                    t.sp = (t.sp - 8) & WORD_MASK
+                    self.mem.store_word(t.sp, t.regs[base_reg + i])
+
+        # ---- POP.MULTI (Format I: rd=bank, imm16=mask) ----
+        elif op == Op.POP_MULTI:
+            bank = inst.rd
+            mask = inst.imm16 & 0xFFFF
+            base_reg = bank * 16
+            for i in range(15, -1, -1):
+                if mask & (1 << i):
+                    t.regs[base_reg + i] = self.mem.load_word(t.sp)
                     t.sp = (t.sp + 8) & WORD_MASK
 
         # ---- TRAP ----
@@ -282,8 +352,11 @@ class Emulator:
 
         # ---- ERET ----
         elif op == Op.ERET:
-            # Phase 1: not implemented (no trap handlers yet)
-            raise LM1Trap(TRAP_UNIMPLEMENTED, "ERET not implemented in Phase 1")
+            # Restore PC from trap state and resume normal execution
+            if not t.in_trap:
+                raise LM1Trap(TRAP_UNIMPLEMENTED, "ERET outside of trap handler")
+            t.in_trap = False
+            next_pc = t.trap_pc
 
         # ---- System info ----
         elif op == Op.SYS_INFO:
@@ -312,6 +385,8 @@ class Emulator:
                 case 0:  t.regs[inst.rd] = t.tile_id
                 case 1:  t.regs[inst.rd] = t.thread_id
                 case 2:  t.regs[inst.rd] = t.cycle_count & WORD_MASK
+                case 3:  t.regs[inst.rd] = t.trap_cause    # TRAP_CAUSE
+                case 4:  t.regs[inst.rd] = t.trap_pc       # TRAP_PC
 
         # ---- HALT / NOP ----
         elif op == Op.HALT_NOP:
@@ -496,10 +571,11 @@ class Emulator:
                 raise LM1Trap(TRAP_NOT_REF, "ST.WB: target is not a ref")
             addr = ref_address(obj_ref)
             self.mem.store_word(addr + (field_idx + 1) * 8, val)
-            # Phase 2: write barrier is a no-op (single-generation nursery).
-            # In Phase 3 we'll add card-table marking here.
+            # Write barrier: if storing a nursery ref into an old-gen object,
+            # mark the card table entry for the object's address.
+            self._write_barrier(addr, val)
 
-        # ---- ST.CAR / ST.CDR ----
+        # ---- ST.CAR / ST.CDR (with write barrier) ----
         elif op == Op.ST_CAR_CDR:
             obj_ref = t.regs[inst.rd]
             val = t.regs[inst.rs1]
@@ -508,6 +584,7 @@ class Emulator:
                 raise LM1Trap(TRAP_NOT_REF, "ST.CAR/CDR: target is not a ref")
             addr = ref_address(obj_ref)
             self.mem.store_word(addr + (selector + 1) * 8, val)
+            self._write_barrier(addr, val)
 
         # ---- TST.SHAPE Rd, Rs, #shape_id ----
         elif op == Op.TST_SHAPE:
@@ -530,6 +607,25 @@ class Emulator:
         return next_pc
 
     # -- Allocation helpers (Phase 2) ---
+
+    def _write_barrier(self, obj_addr: int, stored_val: int) -> None:
+        """Card-table write barrier.
+
+        If *stored_val* is a nursery reference and *obj_addr* lives in old-gen,
+        mark the card covering *obj_addr* as dirty so the GC knows to scan it.
+        """
+        if not is_any_ref(stored_val):
+            return
+        val_addr = ref_address(stored_val)
+        # Is the stored value pointing into the nursery?
+        if not (self.nursery_base <= val_addr < self.nursery_base + self.nursery_size):
+            return
+        # Is the object in old-gen (or at least outside the nursery)?
+        if self.nursery_base <= obj_addr < self.nursery_base + self.nursery_size:
+            return  # both in nursery — no barrier needed
+        card_idx = obj_addr // self.CARD_SIZE
+        if card_idx < self.card_table_size:
+            self.card_table[card_idx] = 1
 
     def _bump_alloc(self, t: ThreadContext, total_bytes: int) -> int:
         """Bump-allocate `total_bytes` from the nursery.
@@ -584,6 +680,134 @@ class Emulator:
         t.regs[rd] = make_ref(addr, cons=True)
 
     # -- Trap handling (Phase 1: emulator-level I/O traps) ---
+
+    # -- GC: Cheney copy collector (Phase 3) ---
+
+    def _is_nursery_addr(self, addr: int) -> bool:
+        """Check if an address falls within the nursery."""
+        return self.nursery_base <= addr < self.nursery_base + self.nursery_size
+
+    def _forward_ref(self, w: int) -> int:
+        """If w is a ref pointing into the nursery, copy the object to old-gen
+        (or return the already-forwarded address).  Returns the updated word.
+        Non-ref or non-nursery words are returned unchanged."""
+        if not is_any_ref(w):
+            return w
+        addr = ref_address(w)
+        if not self._is_nursery_addr(addr):
+            return w  # already in old-gen or elsewhere
+        tag = w & 7  # preserve original tag (cons vs ref)
+
+        # Check if already forwarded: a forwarded object has its header
+        # replaced with a forwarding pointer (a ref with TAG_REF).
+        hdr = self.mem.load_word(addr)
+        if is_ref(hdr) or is_cons_ref(hdr):
+            # Already forwarded — hdr IS the forwarding pointer
+            new_addr = ref_address(hdr)
+            return new_addr | tag
+
+        # Not yet forwarded — copy the object to old-gen
+        if not is_header(hdr):
+            # Shouldn't happen — a non-header, non-forwarded word at an obj base
+            return w
+
+        n_payload_words = header_size(hdr)
+        total_words = 1 + n_payload_words  # header + payload
+        total_bytes = total_words * 8
+
+        # Allocate in old-gen
+        new_addr = self.oldgen_ptr
+        if new_addr + total_bytes > self.oldgen_base + self.oldgen_size:
+            raise RuntimeError(
+                f"Old-gen overflow during GC: need {total_bytes} bytes, "
+                f"have {self.oldgen_base + self.oldgen_size - new_addr}"
+            )
+        self.oldgen_ptr += total_bytes
+
+        # Copy all words (header + payload)
+        for i in range(total_words):
+            self.mem.store_word(new_addr + i * 8,
+                                self.mem.load_word(addr + i * 8))
+
+        # Install forwarding pointer in the nursery copy
+        self.mem.store_word(addr, make_ref(new_addr))
+
+        return new_addr | tag
+
+    def _gc_collect(self) -> None:
+        """Cheney copy collector: evacuate live nursery objects to old-gen.
+
+        Roots: all 32 registers + the stack (from SP to stack_top).
+        Algorithm:
+          1. Scan roots, forward any nursery refs → copies to old-gen
+          2. Scan the copied objects in old-gen (Cheney scan pointer),
+             forwarding any nursery refs found in their fields
+          3. Scan dirty card table entries for old-gen objects that
+             point back into the nursery  (remembered set)
+          4. Reset the nursery
+        """
+        t = self.thread
+        mem = self.mem
+        scan_start = self.oldgen_ptr  # where new copies start
+
+        # --- Phase A: forward roots ---
+
+        # 1. Registers
+        for i in range(32):
+            t.regs[i] = self._forward_ref(t.regs[i])
+
+        # 2. Stack (SP to stack base)
+        # Stack grows downward.  We scan from SP up to the initial stack top.
+        # We don't know the exact stack base, so scan up to a reasonable limit.
+        # Convention: stack area is just below nursery_base (e.g. 0x20000-0x30000)
+        # Actually let's be safe: scan from SP up to nursery_base (exclusive).
+        stack_scan_limit = self.nursery_base
+        sp = t.sp
+        while sp < stack_scan_limit:
+            w = mem.load_word(sp)
+            mem.store_word(sp, self._forward_ref(w))
+            sp += 8
+
+        # 3. Dirty cards: scan old-gen objects that have dirty card entries
+        #    (these contain cross-generational pointers)
+        og_card_start = self.oldgen_base // self.CARD_SIZE
+        og_card_end = min(
+            (self.oldgen_base + self.oldgen_size) // self.CARD_SIZE,
+            self.card_table_size
+        )
+        for card_idx in range(og_card_start, og_card_end):
+            if self.card_table[card_idx]:
+                # Scan all words in this card
+                card_addr = card_idx * self.CARD_SIZE
+                card_end = card_addr + self.CARD_SIZE
+                a = card_addr
+                while a < card_end:
+                    w = mem.load_word(a)
+                    mem.store_word(a, self._forward_ref(w))
+                    a += 8
+                self.card_table[card_idx] = 0  # clear dirty bit
+
+        # --- Phase B: Cheney scan — process copied objects ---
+        scan_ptr = scan_start
+        while scan_ptr < self.oldgen_ptr:
+            w = mem.load_word(scan_ptr)
+            if is_header(w):
+                # Skip the header itself, but forward all payload words
+                n_words = header_size(w)
+                for i in range(1, n_words + 1):
+                    field_addr = scan_ptr + i * 8
+                    fv = mem.load_word(field_addr)
+                    mem.store_word(field_addr, self._forward_ref(fv))
+                scan_ptr += (1 + n_words) * 8
+            else:
+                # Not a header — shouldn't happen in well-formed heap
+                scan_ptr += 8
+
+        # --- Phase C: reset nursery ---
+        t.np = self.nursery_base
+        # NL stays the same (nursery limit unchanged)
+
+        self.gc_count += 1
 
     def _handle_trap(self, code: int) -> None:
         """Handle TRAP instruction.

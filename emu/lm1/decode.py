@@ -70,6 +70,8 @@ class Op(IntEnum):
     PUSH_POP      = 0b110110  # 54
     LI            = 0b110111  # 55
     LUI           = 0b111000  # 56
+    PUSH_MULTI    = 0b111001  # 57  (Format I: rd=bank, imm16=register mask)
+    POP_MULTI     = 0b111010  # 58  (Format I: rd=bank, imm16=register mask)
 
     # System
     TRAP          = 0b111100  # 60
@@ -121,6 +123,8 @@ FUNC_POP_MULTI  = 3
 FUNC_TILE_ID   = 0
 FUNC_THREAD_ID = 1
 FUNC_CYCLE     = 2
+FUNC_TRAP_CAUSE = 3
+FUNC_TRAP_PC    = 4
 
 # HALT_NOP sub-functions
 FUNC_HALT = 0
