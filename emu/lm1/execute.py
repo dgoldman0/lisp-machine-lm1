@@ -41,11 +41,14 @@ from .traps import (
     TRAP_TYPE_MISMATCH, TRAP_STACK_UNDERFLOW,
     TRAP_NURSERY_OVERFLOW, TRAP_NOT_REF,
     TRAP_IC_MISS, TRAP_NOT_CLOSURE,
+    TRAP_QUEUE_FULL, TRAP_QUEUE_EMPTY,
     TRAP_UNIMPLEMENTED,
     trap_name,
 )
 from .core import ThreadContext
 from .memory import Memory
+
+from collections import deque
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +60,12 @@ EMU_TRAP_BLOCK_IO  = 0x82
 
 
 class Emulator:
-    """Single-tile, single-thread LM-1 functional emulator (Phase 1)."""
+    """Single-tile LM-1 functional emulator.
+
+    Phases 1-4: single-thread scalar, tagged, GC, dispatch.
+    Phase 5: message queues (SEND/RECV/TRY.RECV), CAS.TAGGED, FAA, FENCE.GC,
+             multi-thread round-robin scheduling, multi-tile cluster support.
+    """
 
     # Default nursery: 64 KiB at the top of the first 256 KiB
     DEFAULT_NURSERY_BASE  = 0x0003_0000   # 192 KiB offset
@@ -70,6 +78,10 @@ class Emulator:
     # Card table: one byte per 256-byte card (covers nursery + old-gen)
     CARD_SIZE = 256  # bytes per card
 
+    # Queue depth (per queue, per tile)
+    QUEUE_DEPTH = 512
+    NUM_QUEUES  = 4
+
     def __init__(
         self,
         mem_size: int = 4 * 1024 * 1024,  # 4 MiB default
@@ -81,9 +93,18 @@ class Emulator:
         nursery_size: int | None = None,
         oldgen_base: int | None = None,
         oldgen_size: int | None = None,
+        tile_id: int = 0,
+        num_threads: int = 1,
     ):
         self.mem = Memory(mem_size)
-        self.thread = ThreadContext()
+        self.tile_id = tile_id
+
+        # Multi-thread support (Phase 5)
+        self.threads: list[ThreadContext] = []
+        for tid in range(num_threads):
+            tc = ThreadContext(tile_id=tile_id, thread_id=tid)
+            self.threads.append(tc)
+        self._current_thread_idx = 0
 
         # I/O
         self._stdin: TextIO = stdin or sys.stdin
@@ -93,10 +114,6 @@ class Emulator:
         # Nursery region
         self.nursery_base = nursery_base if nursery_base is not None else self.DEFAULT_NURSERY_BASE
         self.nursery_size = nursery_size if nursery_size is not None else self.DEFAULT_NURSERY_SIZE
-        # NP = current allocation pointer (bumps upward)
-        # NL = nursery limit (first address past the nursery)
-        self.thread.np = self.nursery_base
-        self.thread.nl = self.nursery_base + self.nursery_size
 
         # Old-gen region (promotion target for surviving nursery objects)
         self.oldgen_base = oldgen_base if oldgen_base is not None else self.DEFAULT_OLDGEN_BASE
@@ -116,11 +133,33 @@ class Emulator:
         # Per-tile hash map used for polymorphic dispatch.
         self.ic_table: dict[tuple[int, int], int] = {}
 
+        # Hardware message queues (Phase 5): 4 queues per tile
+        self.queues: list[deque] = [
+            deque(maxlen=self.QUEUE_DEPTH) for _ in range(self.NUM_QUEUES)
+        ]
+
+        # Cluster reference for cross-tile messaging (set by Cluster)
+        self.cluster: Optional['Cluster'] = None
+
+        # Initialize nursery pointers for all threads
+        for tc in self.threads:
+            tc.np = self.nursery_base
+            tc.nl = self.nursery_base + self.nursery_size
+
         # Install default header templates (index 0 = cons)
         self._init_header_templates()
 
         # Stats
         self.instruction_count = 0
+
+    @property
+    def thread(self) -> ThreadContext:
+        """Current active thread — backward compatible with single-thread API."""
+        return self.threads[self._current_thread_idx]
+
+    @thread.setter
+    def thread(self, value: ThreadContext) -> None:
+        self.threads[self._current_thread_idx] = value
 
     def _init_header_templates(self) -> None:
         """Set up the default header-template table entries."""
@@ -148,7 +187,7 @@ class Emulator:
         mem = self.mem
         count = 0
 
-        while not t.halted:
+        while not t.halted and not t.stalled:
             # Fetch
             raw = mem.load_u32(t.pc)
             inst = decode(raw)
@@ -698,6 +737,112 @@ class Emulator:
             next_pc = t.pc + (offset * 4)
             # No frame push — reuse current frame
 
+        # ================================================================
+        # Phase 5: Messaging & Atomics
+        # ================================================================
+
+        # ---- SEND: enqueue value to a hardware queue ----
+        elif op == Op.SEND:
+            # Format S: rd (25:21) = queue descriptor register,
+            #           rs1 (20:16) = value register
+            queue_desc = t.regs[inst.rd]
+            value = t.regs[inst.rs1]
+            # Queue descriptor: fixnum encoding (tile_id << 2) | queue_idx
+            # For local queues, tile_id matches self.tile_id.
+            q_raw = untag_fixnum(queue_desc) if is_fixnum(queue_desc) else int(queue_desc)
+            target_tile = q_raw >> 2
+            queue_idx = q_raw & 3
+            if target_tile == self.tile_id:
+                # Local queue
+                q = self.queues[queue_idx]
+                if len(q) >= self.QUEUE_DEPTH:
+                    raise LM1Trap(TRAP_QUEUE_FULL,
+                                  f"SEND: queue {queue_idx} full")
+                q.append(value)
+            elif self.cluster is not None:
+                # Cross-tile: route through cluster
+                self.cluster.route_message(target_tile, queue_idx, value)
+            else:
+                raise LM1Trap(TRAP_QUEUE_FULL,
+                              f"SEND: no cluster for tile {target_tile}")
+
+        # ---- RECV / TRY.RECV: dequeue from a hardware queue ----
+        elif op == Op.RECV:
+            # When func != 0 → TRY.RECV (non-blocking)
+            # When func == 0 → RECV (blocking / traps on empty)
+            queue_desc = t.regs[inst.rs1]
+            q_raw = untag_fixnum(queue_desc) if is_fixnum(queue_desc) else int(queue_desc)
+            target_tile = q_raw >> 2
+            queue_idx = q_raw & 3
+            if target_tile == self.tile_id:
+                q = self.queues[queue_idx]
+            elif self.cluster is not None:
+                q = self.cluster.tiles[target_tile].queues[queue_idx]
+            else:
+                q = deque()  # empty — will trigger trap/nil
+
+            if inst.func != 0:
+                # TRY.RECV: non-blocking.  Rd = value (or nil), Rd2 = status
+                rd2 = inst.func  # Rd2 register index is encoded in func field
+                if len(q) > 0:
+                    t.regs[inst.rd] = q.popleft()
+                    t.regs[rd2] = T
+                else:
+                    t.regs[inst.rd] = NIL
+                    t.regs[rd2] = NIL
+            else:
+                # RECV: blocking.  For multi-thread emulator, stall the thread.
+                if len(q) > 0:
+                    t.regs[inst.rd] = q.popleft()
+                else:
+                    # Stall: mark thread as stalled, don't advance PC
+                    t.stalled = True
+                    t.stall_queue = queue_idx
+                    next_pc = t.pc  # retry on next schedule
+
+        # ---- CAS.TAGGED: atomic compare-and-swap ----
+        elif op == Op.CAS_TAGGED:
+            # Format X: Rd (25:21), Rs_addr (20:16), Rs_expected (15:11),
+            #           Rt_new (10:6) — register index
+            addr_reg = inst.rs1
+            expected_reg = inst.rs2
+            new_reg = inst.func  # bits 10:6 = register index for new value
+            addr = ref_address(t.regs[addr_reg]) if is_any_ref(t.regs[addr_reg]) else t.regs[addr_reg]
+            old = self.mem.load_word(addr)
+            expected = t.regs[expected_reg]
+            if old == expected:
+                new_val = t.regs[new_reg]
+                self.mem.store_word(addr, new_val)
+                # Write barrier if storing a nursery ref into old-gen
+                if is_any_ref(new_val):
+                    self._write_barrier(addr, new_val)
+                t.regs[inst.rd] = T
+            else:
+                t.regs[inst.rd] = NIL
+
+        # ---- FAA / FENCE.GC ----
+        elif op == Op.FAA_FENCE:
+            if inst.func == 0x1F:
+                # FENCE.GC: memory fence for GC coordination
+                # In sequential emulator, this is a no-op.
+                pass
+            else:
+                # FAA: fetch-and-add on fixnum memory
+                addr = ref_address(t.regs[inst.rs1]) if is_any_ref(t.regs[inst.rs1]) else t.regs[inst.rs1]
+                old = self.mem.load_word(addr)
+                delta = t.regs[inst.rs2]
+                if not is_fixnum(old):
+                    raise LM1Trap(TRAP_NOT_FIXNUM,
+                                  f"FAA: mem[{addr:#x}] = {old:#x} is not a fixnum")
+                if not is_fixnum(delta):
+                    raise LM1Trap(TRAP_NOT_FIXNUM,
+                                  "FAA: delta is not a fixnum")
+                # Fixnum add: since tag bit 0 is 0 for both, a + b preserves
+                # the fixnum tag.  We mask to 64 bits.
+                new_val = (old + delta) & WORD_MASK
+                self.mem.store_word(addr, new_val)
+                t.regs[inst.rd] = old
+
         # ---- Not yet implemented ----
         else:
             raise LM1Trap(TRAP_UNIMPLEMENTED, f"Unimplemented opcode {op} ({op:#04x})")
@@ -983,3 +1128,206 @@ class Emulator:
             f"rd={inst.rd} rs1={inst.rs1} rs2={inst.rs2} "
             f"func={inst.func} imm16={inst.imm16}\n"
         )
+
+    # -- Multi-thread round-robin scheduling (Phase 5) ---
+
+    def run_round_robin(self, max_instructions: int = 0,
+                        quanta: int = 1) -> None:
+        """Run multiple threads in round-robin order.
+
+        Each non-halted, non-stalled thread gets *quanta* instructions per
+        round.  A stalled thread (blocked on RECV) is un-stalled when its
+        queue has data.
+        """
+        mem = self.mem
+        count = 0
+        n_threads = len(self.threads)
+
+        while True:
+            any_runnable = False
+
+            for tidx in range(n_threads):
+                self._current_thread_idx = tidx
+                t = self.threads[tidx]
+
+                if t.halted:
+                    continue
+
+                # Check if stalled thread can be un-stalled
+                if t.stalled:
+                    q = self.queues[t.stall_queue]
+                    if len(q) > 0:
+                        t.stalled = False
+                        t.stall_queue = -1
+                    else:
+                        continue  # still stalled
+
+                any_runnable = True
+
+                # Execute up to *quanta* instructions on this thread
+                for _ in range(quanta):
+                    if t.halted or t.stalled:
+                        break
+
+                    raw = mem.load_u32(t.pc)
+                    inst = decode(raw)
+
+                    if self.trace:
+                        self._trace_instruction(t.pc, inst)
+
+                    next_pc = t.pc + 4
+
+                    try:
+                        next_pc = self._execute(inst, next_pc)
+                    except LM1Trap as trap:
+                        if trap.code == TRAP_NURSERY_OVERFLOW:
+                            self._gc_collect()
+                            next_pc = t.pc
+                        elif t.trap_table_base != 0 and trap.code < 0x80:
+                            t.trap_pc = t.pc
+                            t.trap_cause = trap.code
+                            t.in_trap = True
+                            handler_addr = mem.load_word(
+                                t.trap_table_base + trap.code * 8
+                            )
+                            if handler_addr == 0:
+                                raise
+                            next_pc = handler_addr
+                        else:
+                            raise
+
+                    t.pc = next_pc
+                    t.cycle_count += 1
+                    self.instruction_count += 1
+                    count += 1
+
+                    if max_instructions and count >= max_instructions:
+                        return
+
+            if not any_runnable:
+                break  # all threads halted or deadlocked
+
+
+# ===========================================================================
+# Cluster: multi-tile emulator (Phase 5)
+# ===========================================================================
+
+class Cluster:
+    """Manages multiple Emulator tiles with cross-tile message routing.
+
+    Queue descriptors are fixnum-encoded: (tile_id << 2) | queue_idx.
+    """
+
+    def __init__(
+        self,
+        n_tiles: int = 2,
+        *,
+        mem_size: int = 4 * 1024 * 1024,
+        trace: bool = False,
+        nursery_base: int | None = None,
+        nursery_size: int | None = None,
+        oldgen_base: int | None = None,
+        oldgen_size: int | None = None,
+        num_threads_per_tile: int = 1,
+    ):
+        self.tiles: list[Emulator] = []
+        for i in range(n_tiles):
+            emu = Emulator(
+                mem_size=mem_size,
+                trace=trace,
+                nursery_base=nursery_base,
+                nursery_size=nursery_size,
+                oldgen_base=oldgen_base,
+                oldgen_size=oldgen_size,
+                tile_id=i,
+                num_threads=num_threads_per_tile,
+            )
+            emu.cluster = self
+            self.tiles.append(emu)
+
+    def route_message(self, target_tile: int, queue_idx: int,
+                      value: int) -> None:
+        """Deliver a message to a remote tile's queue, trapping on full."""
+        if target_tile < 0 or target_tile >= len(self.tiles):
+            raise LM1Trap(TRAP_QUEUE_FULL,
+                          f"SEND: invalid tile {target_tile}")
+        q = self.tiles[target_tile].queues[queue_idx]
+        if len(q) >= Emulator.QUEUE_DEPTH:
+            raise LM1Trap(TRAP_QUEUE_FULL,
+                          f"SEND: tile {target_tile} queue {queue_idx} full")
+        q.append(value)
+
+    def run(self, max_instructions: int = 0, quanta: int = 1) -> None:
+        """Round-robin across all tiles.
+
+        Each tile executes up to *quanta* instructions per round on its
+        active thread(s).  The outer loop terminates when all tiles' threads
+        are halted or the instruction budget is exhausted.
+        """
+        count = 0
+
+        while True:
+            any_runnable = False
+
+            for tile in self.tiles:
+                n_threads = len(tile.threads)
+                for tidx in range(n_threads):
+                    tile._current_thread_idx = tidx
+                    t = tile.threads[tidx]
+
+                    if t.halted:
+                        continue
+
+                    # Try to un-stall
+                    if t.stalled:
+                        q = tile.queues[t.stall_queue]
+                        if len(q) > 0:
+                            t.stalled = False
+                            t.stall_queue = -1
+                        else:
+                            continue
+
+                    any_runnable = True
+                    mem = tile.mem
+
+                    for _ in range(quanta):
+                        if t.halted or t.stalled:
+                            break
+
+                        raw = mem.load_u32(t.pc)
+                        inst = decode(raw)
+
+                        if tile.trace:
+                            tile._trace_instruction(t.pc, inst)
+
+                        next_pc = t.pc + 4
+
+                        try:
+                            next_pc = tile._execute(inst, next_pc)
+                        except LM1Trap as trap:
+                            if trap.code == TRAP_NURSERY_OVERFLOW:
+                                tile._gc_collect()
+                                next_pc = t.pc
+                            elif t.trap_table_base != 0 and trap.code < 0x80:
+                                t.trap_pc = t.pc
+                                t.trap_cause = trap.code
+                                t.in_trap = True
+                                handler_addr = mem.load_word(
+                                    t.trap_table_base + trap.code * 8
+                                )
+                                if handler_addr == 0:
+                                    raise
+                                next_pc = handler_addr
+                            else:
+                                raise
+
+                        t.pc = next_pc
+                        t.cycle_count += 1
+                        tile.instruction_count += 1
+                        count += 1
+
+                        if max_instructions and count >= max_instructions:
+                            return
+
+            if not any_runnable:
+                break

@@ -35,6 +35,10 @@ class ThreadContext:
     # Halted flag
     halted: bool = False
 
+    # Stalled flag (Phase 5: thread stalled on empty RECV queue)
+    stalled: bool = False
+    stall_queue: int = -1  # queue index this thread is blocked on
+
     # Trap state
     trap_table_base: int = 0
     trap_cause: int = 0
