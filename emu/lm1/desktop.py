@@ -70,9 +70,9 @@ WIN_FULLABLE    = 0x08
 WIN_HAS_VSCROLL = 0x10
 WIN_HAS_HSCROLL = 0x20
 
-TITLE_BAR_H = 18
+TITLE_BAR_H = 20
 BORDER_W    = 1
-MENU_BAR_H  = 18
+MENU_BAR_H  = 20
 MIN_WIN_W   = 80
 MIN_WIN_H   = 60
 
@@ -205,11 +205,13 @@ class AES:
         self._init_desktop_pattern()
 
     def _init_desktop_pattern(self) -> None:
-        """Set up custom palette entries for desktop pattern."""
-        # Set a nice dark blue desktop background
-        self.vdi.set_palette_entry(1, 0x1A, 0x1A, 0x5E)  # dark navy
-        # Better light blue for active title bar
-        self.vdi.set_palette_entry(9, 0x33, 0x66, 0xCC)
+        """Set up custom palette entries for desktop theme."""
+        # Desktop background: teal-blue (Atari ST / GEM inspired)
+        self.vdi.set_palette_entry(1, 0x20, 0x60, 0x60)
+        # Active title bar: deeper blue
+        self.vdi.set_palette_entry(9, 0x22, 0x55, 0xBB)
+        # Desktop pattern accent (slightly lighter than bg)
+        self.vdi.set_palette_entry(16, 0x28, 0x70, 0x70)
 
     # ------------------------------------------------------------------
     # Window management
@@ -273,14 +275,12 @@ class AES:
         """Redraw the entire desktop."""
         vdi = self.vdi
 
-        # 1. Desktop background
+        # 1. Desktop background with subtle crosshatch
         vdi.fill_rect(0, 0, vdi.width, vdi.height, Colors.DESKTOP_BG)
-        # Draw a subtle pattern
-        for py in range(0, vdi.height, 4):
-            for px in range(0, vdi.width, 4):
-                if (px + py) % 8 == 0:
-                    if 0 <= px < vdi.width and 0 <= py < vdi.height:
-                        vdi.fb[py * vdi.width + px] = 0  # dark dot
+        for py in range(0, vdi.height, 8):
+            for px in range(0, vdi.width, 8):
+                if 0 <= px < vdi.width and 0 <= py < vdi.height:
+                    vdi.fb[py * vdi.width + px] = 16  # accent dot
 
         # 2. Windows (bottom to top)
         for win in self._windows:
@@ -327,9 +327,9 @@ class AES:
             vdi.draw_line(bx + CLOSE_BTN_W - 4, by + 3, bx + 3, by + CLOSE_BTN_H - 4,
                            Colors.BLACK)
 
-        # Title text (centered)
+        # Title text (centered horizontally, vertically centered in title bar)
         text_x = win.x + (win.w - len(win.title) * CHAR_W) // 2
-        text_y = win.y + 1
+        text_y = win.y + (TITLE_BAR_H - CHAR_H) // 2
         vdi.draw_string(text_x, text_y, win.title, Colors.TITLE_TEXT, title_bg)
 
         # Client area background
@@ -371,10 +371,10 @@ class AES:
             if i == self._menu_open:
                 vdi.fill_rect(x - 4, 0, label_w, MENU_BAR_H - 1,
                                Colors.MENU_HIGHLIGHT)
-                vdi.draw_string(x, 1, menu.label,
+                vdi.draw_string(x, (MENU_BAR_H - CHAR_H) // 2, menu.label,
                                  Colors.MENU_HI_TEXT, Colors.MENU_HIGHLIGHT)
             else:
-                vdi.draw_string(x, 1, menu.label,
+                vdi.draw_string(x, (MENU_BAR_H - CHAR_H) // 2, menu.label,
                                  Colors.MENU_BAR_TEXT, Colors.MENU_BAR_BG)
             x += label_w
 
