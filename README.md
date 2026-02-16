@@ -38,6 +38,14 @@ The ISA is designed around ~8 semantic instruction families that map directly to
 | [spec/06-runtime.md](spec/06-runtime.md) | Runtime strategy and programming model |
 | [spec/07-encoding.md](spec/07-encoding.md) | Instruction encoding and binary formats |
 
+### Design Documents
+
+| Document | Description |
+|----------|-------------|
+| [design/emulator.md](design/emulator.md) | Emulator architecture and bringup plan |
+| [design/bios.md](design/bios.md) | BIOS / firmware: boot sequence, trap tables, image loader |
+| [design/os.md](design/os.md) | Lispos: actors, object system, GC, storage, REPL |
+
 ## Influences and Prior Art
 
 - **Classic Lisp machines:** Symbolics 3600, TI Explorer (tagged architectures, microcoded dispatch)
