@@ -3,6 +3,10 @@
 Phase 1: scalar ops, raw loads/stores, branches, LI/LUI, NOP, HALT,
 TILE.ID, THREAD.ID, CYCLE, console I/O traps, PUSH/POP.
 
+Phase 2: tagged arithmetic (already in Phase 1), nursery allocation,
+header template table, tagged field access (LD/ST/LD.CAR/LD.CDR/ST.WB/
+ST.CAR/ST.CDR), TST.SHAPE, ALLOC/ALLOC.CONS/ALLOCV/ALLOC.CLOSURE.
+
 Implements the fetch-decode-execute loop for a single tile / single thread.
 """
 
@@ -14,7 +18,11 @@ from typing import Optional, TextIO
 from .word import (
     WORD_MASK, SIGN_BIT, NIL, T,
     is_fixnum, tag_fixnum, untag_fixnum,
+    is_ref, is_cons_ref, is_any_ref, ref_address, make_ref,
+    is_header, make_header, header_size, header_shape_id, header_subtype,
     is_truthy, u64, s64, add64, sub64,
+    HDR_CONS, HDR_CLOSURE, HDR_VECTOR,
+    REF_ADDR_MASK, TAG_REF, TAG_CONS,
 )
 from .decode import (
     Op, Instruction, decode,
@@ -31,6 +39,7 @@ from .traps import (
     LM1Trap,
     TRAP_NOT_FIXNUM, TRAP_FIXNUM_OVERFLOW, TRAP_DIVIDE_BY_ZERO,
     TRAP_TYPE_MISMATCH, TRAP_STACK_UNDERFLOW,
+    TRAP_NURSERY_OVERFLOW, TRAP_NOT_REF,
     TRAP_UNIMPLEMENTED,
     trap_name,
 )
@@ -49,6 +58,10 @@ EMU_TRAP_BLOCK_IO  = 0x82
 class Emulator:
     """Single-tile, single-thread LM-1 functional emulator (Phase 1)."""
 
+    # Default nursery: 64 KiB at the top of the first 256 KiB
+    DEFAULT_NURSERY_BASE  = 0x0003_0000   # 192 KiB offset
+    DEFAULT_NURSERY_SIZE  = 0x0001_0000   # 64 KiB
+
     def __init__(
         self,
         mem_size: int = 4 * 1024 * 1024,  # 4 MiB default
@@ -56,6 +69,8 @@ class Emulator:
         trace: bool = False,
         stdin: TextIO | None = None,
         stdout: TextIO | None = None,
+        nursery_base: int | None = None,
+        nursery_size: int | None = None,
     ):
         self.mem = Memory(mem_size)
         self.thread = ThreadContext()
@@ -65,8 +80,29 @@ class Emulator:
         self._stdout: TextIO = stdout or sys.stdout
         self.trace = trace
 
+        # Nursery region
+        self.nursery_base = nursery_base if nursery_base is not None else self.DEFAULT_NURSERY_BASE
+        self.nursery_size = nursery_size if nursery_size is not None else self.DEFAULT_NURSERY_SIZE
+        # NP = current allocation pointer (bumps upward)
+        # NL = nursery limit (first address past the nursery)
+        self.thread.np = self.nursery_base
+        self.thread.nl = self.nursery_base + self.nursery_size
+
+        # Install default header templates (index 0 = cons)
+        self._init_header_templates()
+
         # Stats
         self.instruction_count = 0
+
+    def _init_header_templates(self) -> None:
+        """Set up the default header-template table entries."""
+        t = self.thread
+        # Index 0: Cons cell header (hdr_sub=1, size=2, shape_id=0)
+        t.header_templates[0] = make_header(HDR_CONS, 2, 0)
+        # Index 1: Closure header template (hdr_sub=4, size=0 — filled at alloc)
+        t.header_templates[1] = make_header(HDR_CLOSURE, 0, 1)
+        # Index 2: Vector header template (hdr_sub=2, size=0 — filled at alloc)
+        t.header_templates[2] = make_header(HDR_VECTOR, 0, 2)
 
     # -- Register / memory convenience ---
 
@@ -373,11 +409,179 @@ class Emulator:
         elif op in (Op.PREFETCH_REF, Op.PREFETCH_FLD, Op.PREFETCH_CDR, Op.GATHER_PRE):
             pass  # no-op in emulator
 
+        # ================================================================
+        # Phase 2: Allocation
+        # ================================================================
+
+        # ---- ALLOC Rd, #words, #header_template ----
+        elif op == Op.ALLOC:
+            rd = (inst.raw26 >> 21) & 0x1F
+            n_words = (inst.raw26 >> 16) & 0x1F
+            tmpl_idx = inst.raw26 & 0xFFFF
+            total_bytes = (1 + n_words) * 8  # header + payload
+            self._alloc_object(t, rd, total_bytes, tmpl_idx, n_words)
+
+        # ---- ALLOC.CONS Rd ----
+        elif op == Op.ALLOC_CONS:
+            rd = (inst.raw26 >> 21) & 0x1F
+            total_bytes = 3 * 8  # header + car + cdr = 24 bytes
+            self._alloc_cons(t, rd)
+
+        # ---- ALLOCV Rd, Rs_length, #header_template ----
+        elif op == Op.ALLOCV:
+            rd = (inst.raw26 >> 21) & 0x1F
+            rs_len = (inst.raw26 >> 16) & 0x1F
+            tmpl_idx = inst.raw26 & 0xFFFF
+            length = t.regs[rs_len]
+            if not is_fixnum(length):
+                raise LM1Trap(TRAP_NOT_FIXNUM, "ALLOCV: length must be a fixnum")
+            n_elems = untag_fixnum(length)
+            # Vector layout: header + length_word + elements
+            n_words = 1 + n_elems  # length word + elements
+            total_bytes = (1 + n_words) * 8  # header + payload
+            self._alloc_object(t, rd, total_bytes, tmpl_idx, n_words,
+                               init_fn=lambda addr: self.mem.store_word(addr + 8, length))
+
+        # ---- ALLOC.CLOSURE Rd, Rs_code, #env_size ----
+        elif op == Op.ALLOC_CLOSURE:
+            rd = (inst.raw26 >> 21) & 0x1F
+            rs_code = (inst.raw26 >> 16) & 0x1F
+            env_size = (inst.raw26 >> 11) & 0x1F
+            code_ptr = t.regs[rs_code]
+            n_words = 1 + env_size  # code_entry + env slots
+            total_bytes = (1 + n_words) * 8
+            self._alloc_object(t, rd, total_bytes, 1, n_words,  # template 1 = closure
+                               init_fn=lambda addr: self.mem.store_word(addr + 8, code_ptr))
+
+        # ================================================================
+        # Phase 2: Tagged Field Access
+        # ================================================================
+
+        # ---- LD Rd, Rs, #field ----
+        elif op == Op.LD:
+            obj_ref = t.regs[inst.rs1]
+            if not is_any_ref(obj_ref):
+                raise LM1Trap(TRAP_NOT_REF, "LD: source is not a ref")
+            field_idx = inst.imm16 & 0x1F
+            addr = ref_address(obj_ref)
+            # Skip header: field 0 is at offset +8
+            t.regs[inst.rd] = self.mem.load_word(addr + (field_idx + 1) * 8)
+
+        # ---- LD.CAR / LD.CDR ----
+        elif op == Op.LD_CAR_CDR:
+            obj_ref = t.regs[inst.rs1]
+            if not is_any_ref(obj_ref):
+                raise LM1Trap(TRAP_NOT_REF, "LD.CAR/CDR: source is not a ref")
+            addr = ref_address(obj_ref)
+            selector = inst.imm16 & 1  # 0 = car, 1 = cdr
+            # car at offset +8, cdr at offset +16
+            t.regs[inst.rd] = self.mem.load_word(addr + (selector + 1) * 8)
+
+        # ---- ST Rs, #field, Rt  (no barrier) ----
+        elif op == Op.ST:
+            obj_ref = t.regs[inst.rd]  # Format S: Rs in rd position
+            val = t.regs[inst.rs1]     # Rt in rs1 position
+            field_idx = inst.rs2       # field in rs2 position
+            if not is_any_ref(obj_ref):
+                raise LM1Trap(TRAP_NOT_REF, "ST: target is not a ref")
+            addr = ref_address(obj_ref)
+            self.mem.store_word(addr + (field_idx + 1) * 8, val)
+
+        # ---- ST.WB Rs, #field, Rt  (with write barrier) ----
+        elif op == Op.ST_WB:
+            obj_ref = t.regs[inst.rd]
+            val = t.regs[inst.rs1]
+            field_idx = inst.rs2
+            if not is_any_ref(obj_ref):
+                raise LM1Trap(TRAP_NOT_REF, "ST.WB: target is not a ref")
+            addr = ref_address(obj_ref)
+            self.mem.store_word(addr + (field_idx + 1) * 8, val)
+            # Phase 2: write barrier is a no-op (single-generation nursery).
+            # In Phase 3 we'll add card-table marking here.
+
+        # ---- ST.CAR / ST.CDR ----
+        elif op == Op.ST_CAR_CDR:
+            obj_ref = t.regs[inst.rd]
+            val = t.regs[inst.rs1]
+            selector = inst.rs2  # field: 0 = car, 1 = cdr
+            if not is_any_ref(obj_ref):
+                raise LM1Trap(TRAP_NOT_REF, "ST.CAR/CDR: target is not a ref")
+            addr = ref_address(obj_ref)
+            self.mem.store_word(addr + (selector + 1) * 8, val)
+
+        # ---- TST.SHAPE Rd, Rs, #shape_id ----
+        elif op == Op.TST_SHAPE:
+            val = t.regs[inst.rs1]
+            shape_test = inst.imm16 & 0xFFFF
+            if is_any_ref(val):
+                addr = ref_address(val)
+                hdr = self.mem.load_word(addr)
+                if is_header(hdr) and (header_shape_id(hdr) & 0xFFFF) == shape_test:
+                    t.regs[inst.rd] = T
+                else:
+                    t.regs[inst.rd] = NIL
+            else:
+                t.regs[inst.rd] = NIL
+
         # ---- Not yet implemented ----
         else:
             raise LM1Trap(TRAP_UNIMPLEMENTED, f"Unimplemented opcode {op} ({op:#04x})")
 
         return next_pc
+
+    # -- Allocation helpers (Phase 2) ---
+
+    def _bump_alloc(self, t: ThreadContext, total_bytes: int) -> int:
+        """Bump-allocate `total_bytes` from the nursery.
+
+        Returns the address of the new object (aligned to 8).
+        Raises TRAP_NURSERY_OVERFLOW if the nursery is full.
+        """
+        addr = t.np
+        new_np = addr + total_bytes
+        if new_np > t.nl:
+            raise LM1Trap(TRAP_NURSERY_OVERFLOW,
+                          f"Nursery overflow: need {total_bytes} bytes, "
+                          f"have {t.nl - t.np}")
+        t.np = new_np
+        return addr
+
+    def _alloc_object(self, t: ThreadContext, rd: int, total_bytes: int,
+                      tmpl_idx: int, n_words: int,
+                      *, init_fn=None) -> None:
+        """Generic allocation: bump NP, write header, zero fields, make ref."""
+        addr = self._bump_alloc(t, total_bytes)
+
+        # Build header from template, patching in the actual size
+        tmpl = t.header_templates[tmpl_idx & 0xFFFF] if tmpl_idx < len(t.header_templates) else 0
+        # Patch size into the header (bits 23:8)
+        hdr = (tmpl & ~(0xFFFF << 8)) | ((n_words & 0xFFFF) << 8)
+        self.mem.store_word(addr, hdr)
+
+        # Zero payload words
+        for i in range(1, n_words + 1):
+            self.mem.store_word(addr + i * 8, 0)
+
+        # Optional init (e.g., write code pointer for closure, length for vector)
+        if init_fn is not None:
+            init_fn(addr)
+
+        # Write a ref to the new object into Rd
+        t.regs[rd] = make_ref(addr)
+
+    def _alloc_cons(self, t: ThreadContext, rd: int) -> None:
+        """Allocate a cons cell (header + car + cdr = 24 bytes)."""
+        addr = self._bump_alloc(t, 24)
+
+        # Cons header: template index 0
+        hdr = t.header_templates[0]
+        self.mem.store_word(addr, hdr)
+        # car and cdr default to nil
+        self.mem.store_word(addr + 8, NIL)
+        self.mem.store_word(addr + 16, NIL)
+
+        # Cons ref (tag = 011)
+        t.regs[rd] = make_ref(addr, cons=True)
 
     # -- Trap handling (Phase 1: emulator-level I/O traps) ---
 

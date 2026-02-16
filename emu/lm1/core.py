@@ -45,6 +45,10 @@ class ThreadContext:
     tile_id: int = 0
     thread_id: int = 0
 
+    # Header-template table (indexed by 16-bit template index)
+    # Each entry is a full 64-bit header word.
+    header_templates: list[int] = field(default_factory=lambda: [0] * 256)
+
     # -- Register access helpers --
 
     def get_reg(self, idx: int) -> int:
