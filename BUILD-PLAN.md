@@ -1,6 +1,7 @@
 # LM-1 Build Plan
 
-**Date:** 2026-02-16
+**Date:** 2026-02-16  
+**Updated:** 2026-02-16
 
 ---
 
@@ -8,147 +9,225 @@
 
 Build bottom-up. Each phase produces something testable. No phase depends on something that isn't already working.
 
+## Status Key
+
+- [x] Done and committed
+- [ ] Not started
+
+---
+
 ## Phases
 
-### Phase 1: Emulator Core — Scalar Execution
+### Phase 1: Emulator Core — Scalar Execution ✅
 **Goal:** Execute raw scalar instructions on 1 tile, 1 thread.
+**Status:** Complete. 26 tests. Committed.
 
-- [ ] Project setup (Python package with `pyproject.toml`, C++ extension stub)
-- [ ] Word type (64-bit int with tag helpers: `is_fixnum`, `is_ref`, `tag_fixnum`, `untag_fixnum`, etc.)
-- [ ] Instruction encoding/decoding (32-bit → opcode + fields)
-- [ ] Register file (32 × u64 + special registers)
-- [ ] Memory (flat `Vec<u64>` with byte-addressable read/write)
-- [ ] Execution loop: fetch → decode → match → execute
-- [ ] Implement scalar ops: `ADD`, `SUB`, `AND`, `OR`, `XOR`, `SHL`, `SHR`, `LI`, `LUI`
-- [ ] Implement raw loads/stores: `LDR`, `STR`
-- [ ] Implement branches: `BR`, `BR.T`, `BR.NIL`, `BR.EQ`, `BR.FIX.LT/EQ/GT`
-- [ ] Implement `NOP`, `HALT`, `TILE.ID`, `THREAD.ID`, `CYCLE`
-- [ ] Console I/O traps: `TRAP #0x80` (putchar), `TRAP #0x81` (getchar)
-- [ ] Minimal CLI: load a binary, run it, print output
-- [ ] Test: hand-assemble a program that prints "LM-1\n"
+- [x] Word type (64-bit int with tag helpers)
+- [x] Instruction encoding/decoding (32-bit → opcode + fields)
+- [x] Register file (32 × u64 + special registers)
+- [x] Memory (flat byte-addressable read/write)
+- [x] Execution loop: fetch → decode → match → execute
+- [x] Scalar ops: `ADD`, `SUB`, `AND`, `OR`, `XOR`, `SHL`, `SHR`, `LI`, `LUI`
+- [x] Raw loads/stores: `LDR`, `STR`
+- [x] Branches: `BR`, `BR.T`, `BR.NIL`, `BR.EQ`, `BR.FIX.LT/EQ/GT`
+- [x] `NOP`, `HALT`, `TILE.ID`, `THREAD.ID`, `CYCLE`
+- [x] Console I/O traps: `TRAP #0x80` (putchar), `TRAP #0x81` (getchar)
+- [x] Minimal CLI: load a binary, run it, print output
+- [x] Test: hand-assemble a program that prints "LM-1\n"
 
-### Phase 2: Tagged Operations & Allocation
+### Phase 2: Tagged Operations & Allocation ✅
 **Goal:** Fixnum arithmetic, type tests, and nursery allocation work.
+**Status:** Complete. 20 tests. Committed.
 
-- [ ] Tagged arithmetic: `ADD.FIX`, `SUB.FIX`, `MUL.FIX`, `DIV.FIX`, `ADD.FIX.IMM`
-- [ ] Type tests: `TST` (all tag variants), `EQ`, `CMP.TAGGED`
-- [ ] Nursery state: `np`, `nl` registers, configurable nursery region
-- [ ] `ALLOC`, `ALLOC.CONS`, `ALLOCV`, `ALLOC.CLOSURE`
-- [ ] Header template table (array of u64, indexed by instruction field)
-- [ ] Tagged field access: `LD`, `ST`, `LD.CAR`, `LD.CDR`
-- [ ] Test: program that conses a list of 100 fixnums, walks it, sums them
+- [x] Tagged arithmetic: `ADD.FIX`, `SUB.FIX`, `MUL.FIX`, `DIV.FIX`, `ADD.FIX.IMM`
+- [x] Type tests: `TST` (all tag variants), `EQ`, `CMP.TAGGED`
+- [x] Nursery state: `np`, `nl` registers, configurable nursery region
+- [x] `ALLOC`, `ALLOC.CONS`, `ALLOCV`, `ALLOC.CLOSURE`
+- [x] Header template table (array of u64, indexed by instruction field)
+- [x] Tagged field access: `LD`, `ST`, `LD.CAR`, `LD.CDR`
+- [x] Test: program that conses a list of 100 fixnums, walks it, sums them
 
-### Phase 3: Traps and GC
+### Phase 3: Traps and GC ✅
 **Goal:** Trap mechanism works. Nursery overflow triggers GC.
+**Status:** Complete. 16 tests. Committed.
 
-- [ ] Trap table: per-thread base register, dispatch on trap code
-- [ ] Trap entry: save PC, jump to handler. `ERET`: restore PC, resume.
-- [ ] `PUSH`, `POP`, `PUSH.MULTI`, `POP.MULTI` for saving/restoring in handlers
-- [ ] Write barrier: `ST.WB`, `ST.CAR`, `ST.CDR` — card table update logic
-- [ ] Card table: byte array, mark on cross-gen store
-- [ ] Implement `TRAP_NURSERY_OVERFLOW` handler (Cheney's copy GC in LM-1 asm)
-- [ ] Cluster shared SRAM as old-gen target
-- [ ] Test: allocate until nursery overflows 10×, verify live objects survive
+- [x] Trap table: per-thread base register, dispatch on trap code
+- [x] Trap entry: save PC, jump to handler. `ERET`: restore PC, resume.
+- [x] `PUSH`, `POP`, `PUSH.MULTI`, `POP.MULTI`
+- [x] Write barrier: `ST.WB`, `ST.CAR`, `ST.CDR` — card table update
+- [x] Card table: byte array, mark on cross-gen store
+- [x] `TRAP_NURSERY_OVERFLOW` handler (Cheney's copy GC in LM-1 asm)
+- [x] Cluster shared SRAM as old-gen target
+- [x] Test: allocate until nursery overflows 10×, verify live objects survive
 
-### Phase 4: Dispatch (IC)
+### Phase 4: Dispatch (IC) ✅
 **Goal:** `CALL.IC` hit/miss/install cycle works.
+**Status:** Complete. 8 tests. Committed.
 
-- [ ] IC table: hash map of (callsite, shape) → code_entry per tile
-- [ ] `CALL.IC`: probe IC, hit → direct jump, miss → `TRAP_IC_MISS`
-- [ ] `IC.INSTALL`: populate IC entry
-- [ ] `CALL.DIRECT`, `CALL.CLOSURE`, `RET`
-- [ ] `TAILCALL.IC`, `TAILCALL.DIRECT`
-- [ ] Frame push/pop mechanics (save lr, fp to stack)
-- [ ] `TST.SHAPE` (check shape hint, fall back to header load)
-- [ ] Test: define two "classes" (shapes), dispatch a method on each
+- [x] IC table: hash map of (callsite, shape) → code_entry per tile
+- [x] `CALL.IC`, `IC.INSTALL`, `CALL.DIRECT`, `CALL.CLOSURE`, `RET`
+- [x] `TAILCALL.IC`, `TAILCALL.DIRECT`
+- [x] Frame push/pop mechanics (save lr, fp to stack)
+- [x] `TST.SHAPE`
+- [x] Test: define two "classes" (shapes), dispatch a method on each
 
-### Phase 5: Messaging & Multi-Tile
+### Phase 5: Messaging & Multi-Tile ✅
 **Goal:** Multiple tiles running, passing messages.
+**Status:** Complete. 14 tests. Committed.
 
-- [ ] Multi-tile memory layout (N tiles × SRAM)
-- [ ] Multi-thread scheduling (round-robin within tile)
-- [ ] Hardware queues: `SEND`, `RECV`, `TRY.RECV`
-- [ ] Cross-tile message routing (direct function call in emulator)
-- [ ] `CAS.TAGGED`, `FAA` on shared memory
-- [ ] `FENCE.GC`
-- [ ] Test: producer on tile 0 sends fixnums, consumer on tile 1 sums them
+- [x] Multi-tile memory layout (N tiles × SRAM)
+- [x] Multi-thread scheduling (round-robin within tile)
+- [x] Hardware queues: `SEND`, `RECV`, `TRY.RECV`
+- [x] Cross-tile message routing
+- [x] `CAS.TAGGED`, `FAA` on shared memory
+- [x] `FENCE.GC`
+- [x] Test: producer on tile 0 sends fixnums, consumer on tile 1 sums them
 
-### Phase 6: Assembler
+### Phase 6: Assembler ✅
 **Goal:** Stop hand-encoding binaries. Write assembly, get binaries.
+**Status:** Complete. 14 tests. Committed (f518126).
 
-- [ ] Text assembler: reads LM-1 mnemonics, outputs 32-bit words
-- [ ] Label resolution (forward/backward references)
-- [ ] `.data` directives for constants and header templates
-- [ ] Outputs flat binary or `.lmo` object format
-- [ ] Re-express all prior tests as assembly source files
+- [x] Text assembler: reads LM-1 mnemonics, outputs 32-bit words
+- [x] Label resolution (forward/backward references)
+- [x] Directives: `.word`, `.u32`, `.byte`, `.align`, `.equ`, `.template`, `.org`, `.space`
+- [x] Pseudo-instructions: `MOV`, `LIA`
+- [x] Two-pass assembly
 
-### Phase 7: BIOS
+### Phase 7: BIOS ✅
 **Goal:** BIOS boots on the emulator and hands off to an OS image.
+**Status:** Complete. Committed.
 
-- [ ] Write BIOS in LM-1 assembly (using the assembler from Phase 6)
-- [ ] Phase 1–5 BIOS code (init, traps, GC, IC, console, image loader)
-- [ ] Block device emulation: `TRAP #0x82` reads/writes host file
-- [ ] Boot info block construction
-- [ ] Test: BIOS boots, prints banner, loads a trivial OS image, jumps to it
+- [x] BIOS in LM-1 assembly (via Phase 6 assembler)
+- [x] `assemble_bios()`, `make_os_image()` helpers
+- [x] Block device emulation: `TRAP #0x82`
+- [x] Boot info block construction
+- [x] Test: BIOS boots, prints banner, loads OS image, jumps to entry
 
-### Phase 8: Lispos Kernel (OS-0 through OS-2)
-**Goal:** Boot to a working REPL with an object system.
+### Phase 8: Cross-Compiler & Lispos Kernel ✅
+**Goal:** Boot to a working REPL.
+**Status:** Complete. Committed (f063a8e).
 
-- [ ] Bootstrap compiler: enough to compile Lisp to LM-1 (cross-compiler, runs on host)
-- [ ] OS init: replace trap table, init GC, init symbol table
-- [ ] Reader: `read` parses S-expressions from console input
-- [ ] Printer: `print` outputs tagged values to console
-- [ ] Eval: compile-and-run a form (initially: interpret or very simple codegen)
-- [ ] REPL loop: `(loop (print (eval (read))))`
-- [ ] `defun`, `lambda`, `let`, `if`, `cond`, `quote`, `cons`, `car`, `cdr`, `eq`, `+`, `-`, `*`, `/`
-- [ ] Object system: `defclass`, `defgeneric`, `defmethod`, shape creation
-- [ ] Condition system: `handler-bind`, `signal`, `invoke-restart`
-- [ ] Test: `(+ 1 2)` → `3` at the REPL. `(defun fact (n) (if (eq n 0) 1 (* n (fact (- n 1))))) (fact 10)` → `3628800`
+- [x] Cross-compiler: Lisp forms → LM-1 assembly
+- [x] S-expression parser (`parse()`)
+- [x] Compile: `defun`, `lambda`, `let`, `if`, `cond`, `quote`, `and`, `or`, `set!`
+- [x] Compile: `+`, `-`, `*`, `/`, `cons`, `car`, `cdr`, `eq`, `=`, `<`, `>`
+- [x] Compile: `null`, `not`, `atom`, `fixnump`, `consp`, `set-car!`, `set-cdr!`
+- [x] Calling convention: r1-r8 args, r1 return, r16-r24 callee-saved
+- [x] Runtime helpers: `putchar`, `getchar`, `print-fixnum`, `print`, `newline`
+- [x] Reader (in LM-1 asm): parse S-expressions from console
+- [x] Evaluator (in LM-1 asm): dispatch on operator codes
+- [x] REPL loop: read, eval, print
+- [x] Test: `(+ 1 2)` → `3`, `(fact 10)` → `3628800`
 
-### Phase 9: VDI Display Engine (Emulator)
+### Phase 9: VDI Display Engine ✅
 **Goal:** Framebuffer output visible on the host. Blit and text primitives work.
+**Status:** Complete. 23 tests. Committed.
 
-- [ ] VDI device model: framebuffer-backed MMIO (VDI_MODE, VDI_FB_BASE, VDI_PALETTE, etc.)
-- [ ] SDL2 host window (or Pygame fallback): present framebuffer as texture at 60 Hz
-- [ ] VDI drawing primitives: rect fill, bitblt with ROP, color expansion (font rendering)
-- [ ] 8-bit indexed-color palette with CLUT
-- [ ] Hardware cursor overlay
-- [ ] Host keyboard/mouse → LM-1 event injection
-- [ ] Emulator trap for VDI commands: `TRAP #0x83` (vdi_call, r1=function, r2..=args)
-- [ ] Test: fill screen with a color, draw rectangles, render text, animate cursor
+- [x] VDI class: 8-bit indexed-color framebuffer with 256-entry CLUT
+- [x] Pygame host display (headless mode for testing)
+- [x] Drawing primitives: rect fill, bitblt, line (Bresenham), scroll
+- [x] 8×16 CP437-style bitmap font (128 ASCII glyphs)
+- [x] Hardware cursor overlay (XOR pattern)
+- [x] Host keyboard/mouse → event queue
+- [x] VDI function codes 0-12 (SET_MODE through READ_EVENT)
+- [x] Screenshot export via PIL (`to_pil_image()`)
+- [x] Test: fill, draw rects, render text, animate cursor
 
-### Phase 10: Crystal Desktop — Window Manager
+### Phase 10: Crystal Desktop — Window Manager ✅
 **Goal:** Overlapping windows with move/resize/raise/lower, global menu bar, event dispatch.
+**Status:** Complete. 24 tests. Committed (b9e57c3). Visual bug fix committed (9a414f2).
 
-- [ ] Crystal AES: window open/close/move/resize, z-order management
-- [ ] Redraw protocol: AES sends redraw events, app repaints via VDI
-- [ ] Event loop: keyboard, mouse, timer events routed to focused window
-- [ ] Global menu bar (GEM-style: active app's menu merges with system menu)
-- [ ] Menus as Lisp lists — define, display, dispatch
-- [ ] Window decorations: title bar, close/full/iconify gadgets, resize handle
-- [ ] Click-to-focus policy
-- [ ] Desktop root window (background color/pattern, desktop icons)
-- [ ] Test: open 3 overlapping windows, move/resize/raise, menu bar responds
+- [x] AES: window create/close/raise/lower, z-order list
+- [x] Window dataclass with flags (closeable, moveable, resizable)
+- [x] Event dispatch: mouse down/up/move, key down → focused window
+- [x] Click-to-focus, drag-to-move, grip-to-resize
+- [x] Global menu bar (GEM-style: system + active app menus)
+- [x] Dropdown menus with highlight, separators, callbacks
+- [x] Window decorations: title bar, close button (X), resize grip
+- [x] Desktop background (teal-blue + crosshatch pattern)
+- [x] Built-in crystallites: Terminal (with Lisp REPL), Calculator, Clock
+- [x] Visual test driver (`desktop_test_driver.py`): headless screenshots + synthetic input
+- [x] Font bug fix: proper 16-row glyphs with `_g()`/`_gd()` padding
+- [x] Test: open 3 overlapping windows, move/resize/raise, menu bar responds
 
-### Phase 11: Crystal Desktop — Crystalets, File Manager, Theming
+### Phase 11: Crystallites, File Manager, Theming
 **Goal:** Desk accessories, spatial file manager, resource system, scrap, themes.
+**Status:** Partially started — basic crystallites (terminal, clock, calculator) done in Phase 10.
 
-- [ ] Crystalet framework: system-registered micro-apps, always available
-- [ ] Standard Crystalets: clock, calculator, terminal (REPL-in-a-window), inspector
+- [x] Crystallite framework: system-registered micro-apps, always available
+- [x] Standard crystallites: clock, calculator, terminal (REPL-in-a-window)
+- [ ] Inspector crystallite
 - [ ] Scrap (clipboard): typed, structured, with history and type negotiation
 - [ ] Resource system: menus/dialogs/alerts as editable Lisp data
 - [ ] Spatial file manager: folder=window, icons, drag-and-drop, file associations
 - [ ] Desktop profile: serialize/deserialize desktop state as Lisp form
 - [ ] Theming: theme objects (colors, fonts, metrics, icons), live switching
-- [ ] Control Panel Crystalet: theme picker, mouse speed, resolution
+- [ ] Control Panel crystallite: theme picker, mouse speed, resolution
 - [ ] Test: full desktop session — open file manager, launch editor, use clock, switch theme
+
+### Phase 12: Visual Modernization
+**Goal:** Crystal Desktop looks like a modern spiritual successor to GEM, not an 80s replica.
+**Status:** Not started.
+
+- [ ] Modern palette system: allocate 256-color CLUT with gradient ramps (active/inactive title bars, desktop gradient, shadow levels, button gradients)
+- [ ] VDI gradient primitives: horizontal gradient fill, shadow rect
+- [ ] Window chrome: gradient title bars, drop shadows, refined borders
+- [ ] Menu bar: gradient background, modern dropdown with proper shadow
+- [ ] Calculator/clock: modern widget styling
+- [ ] Desktop background: gradient instead of flat fill + dots
+- [ ] Screenshot verification with DesktopDriver
+- [ ] Test: visual regression tests
+
+### Phase 13: Compiler Extensions
+**Goal:** Cross-compiler powerful enough to write the desktop natively.
+**Status:** Not started. Compiler already has: `defun`, `lambda`, `let`, `if`, `cond`, `and`, `or`, `set!`, `quote`, arithmetic, cons ops, comparisons.
+
+- [ ] `while` / `loop` (iteration without recursion)
+- [ ] `>=`, `<=` comparison operators
+- [ ] `begin` / `progn` (already exists — verify and test)
+- [ ] String literals: stored in memory, address-based access
+- [ ] Vector/array operations: `make-vector`, `vector-ref`, `vector-set!`, `vector-length`
+- [ ] `do` / named `let` for iteration
+- [ ] Character operations: `char->fixnum`, `fixnum->char`
+- [ ] VDI trap wrappers: `(vdi-fill-rect x y w h color)` etc.
+- [ ] Test: compile and run programs using all new forms
+
+### Phase 14: Native Desktop Skeleton
+**Goal:** Event loop and basic window management running as compiled Lisp on the LM-1.
+**Status:** Not started.
+
+- [ ] VDI system calls from Lisp (via TRAP 0x83 wrappers)
+- [ ] Event loop in compiled Lisp
+- [ ] Window data structures as vectors
+- [ ] Window create/draw/move in Lisp
+- [ ] Basic menu bar in Lisp
+- [ ] Boots via BIOS, runs as OS image
+- [ ] Test: native desktop boots, draws a window, handles click
 
 ---
 
-## What to Build First
+## Test Summary
 
-Phases 1-2 are the foundation. Everything else depends on them. Phase 6 (assembler) could arguably come earlier — but hand-encoding a few small test programs is faster than building an assembler when we only need 10-20 instructions for initial tests.
+| Phase | Tests |
+|-------|-------|
+| 1     | 26    |
+| 2     | 20    |
+| 3     | 16    |
+| 4     | 8     |
+| 5     | 14    |
+| 6     | 14    |
+| 7     | —     |
+| 8     | —     |
+| 9     | 23    |
+| 10    | 24    |
+| **Total** | **175** (all passing) |
 
-Phases 9-11 (graphics and desktop) depend on Phase 8 (Lispos kernel) for the object system and REPL. Phase 9 (VDI engine) can be prototyped in parallel with earlier phases by using emulator traps for VDI calls.
+---
 
-**Start now: Phase 1.**
+## Architecture Notes
+
+- **Python 3.12.3** with venv (no C++ acceleration yet)
+- **LM-1 ISA:** 64-bit tagged words, 32-bit fixed-width instructions, 6-bit opcode, 5 encoding formats
+- **VDI:** 640×480 default, 8-bit indexed color, pygame display (headless for tests)
+- **Cross-compiler:** Lisp → LM-1 assembly → binary via two-pass assembler
+- **Desktop:** Host-side Python (AES + VDI). Native port planned for Phase 14.

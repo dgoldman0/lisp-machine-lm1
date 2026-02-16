@@ -689,10 +689,10 @@ class AES:
 
 
 # ===================================================================
-# Built-in Crystalets
+# Built-in Crystallites
 # ===================================================================
 
-class TerminalCrystalet:
+class TerminalCrystallite:
     """A simple terminal/REPL window."""
 
     def __init__(self, aes: AES, x: int = 60, y: int = 50,
@@ -907,7 +907,7 @@ class TerminalCrystalet:
         self._output(time.strftime("%Y-%m-%d %H:%M:%S"))
 
 
-class ClockCrystalet:
+class ClockCrystallite:
     """A simple clock desk accessory."""
 
     def __init__(self, aes: AES, x: int = 480, y: int = 30):
@@ -946,7 +946,7 @@ class ClockCrystalet:
                 self.aes._dirty = True
 
 
-class CalculatorCrystalet:
+class CalculatorCrystallite:
     """A simple desktop calculator."""
 
     def __init__(self, aes: AES, x: int = 300, y: int = 100):
@@ -1080,16 +1080,16 @@ def launch_desktop(width: int = 640, height: int = 480, scale: int = 2) -> None:
     vdi = VDI(width=width, height=height, headless=False, scale=scale)
     aes = AES(vdi)
 
-    # Create default crystalets
-    terminal = TerminalCrystalet(aes, x=20, y=40, w=400, h=300)
-    clock = ClockCrystalet(aes, x=440, y=30)
-    calc = CalculatorCrystalet(aes, x=440, y=120)
+    # Create default crystallites
+    terminal = TerminalCrystallite(aes, x=20, y=40, w=400, h=300)
+    clock = ClockCrystallite(aes, x=440, y=30)
+    calc = CalculatorCrystallite(aes, x=440, y=120)
 
-    # Add system menu items for launching crystalets
+    # Add system menu items for launching crystallites
     aes._system_menus[0].items.extend([
-        MenuItem("New Terminal", callback=lambda: TerminalCrystalet(aes)),
-        MenuItem("Calculator", callback=lambda: CalculatorCrystalet(aes)),
-        MenuItem("Clock", callback=lambda: ClockCrystalet(aes)),
+        MenuItem("New Terminal", callback=lambda: TerminalCrystallite(aes)),
+        MenuItem("Calculator", callback=lambda: CalculatorCrystallite(aes)),
+        MenuItem("Clock", callback=lambda: ClockCrystallite(aes)),
         MenuItem("", separator=True),
         MenuItem("Quit", callback=lambda: setattr(aes, '_running', False)),
     ])

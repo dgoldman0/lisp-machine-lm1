@@ -2,7 +2,7 @@
 
 Tests the AES window manager, window operations (create, close,
 raise, lower, move, resize), menu bar, event dispatch, and
-the built-in crystalets (terminal, calculator, clock) — all
+the built-in crystallites (terminal, calculator, clock) — all
 headless using the VDI framebuffer.
 """
 
@@ -16,7 +16,7 @@ from lm1.desktop import (
     AES, Window, Colors, Menu, MenuItem,
     TITLE_BAR_H, BORDER_W, MENU_BAR_H, MIN_WIN_W, MIN_WIN_H,
     WIN_CLOSEABLE, WIN_MOVEABLE, WIN_RESIZABLE,
-    TerminalCrystalet, ClockCrystalet, CalculatorCrystalet,
+    TerminalCrystallite, ClockCrystallite, CalculatorCrystallite,
 )
 
 
@@ -279,14 +279,14 @@ def test_menu_open_close():
 
 
 # -------------------------------------------------------------------
-# Built-in crystalets
+# Built-in crystallites
 # -------------------------------------------------------------------
 
-@test("desktop_terminal_crystalet", batch="phase10")
-def test_terminal_crystalet():
-    """Terminal crystalet can receive text and execute commands."""
+@test("desktop_terminal_crystallite", batch="phase10")
+def test_terminal_crystallite():
+    """Terminal crystallite can receive text and execute commands."""
     aes = _make_aes(640, 480)
-    term = TerminalCrystalet(aes)
+    term = TerminalCrystallite(aes)
     assert term.win in aes._windows
 
     # Simulate typing "hello" (without pygame, pass ASCII codes)
@@ -303,7 +303,7 @@ def test_terminal_crystalet():
 def test_terminal_lisp_eval():
     """Terminal can evaluate simple Lisp expressions."""
     aes = _make_aes(640, 480)
-    term = TerminalCrystalet(aes)
+    term = TerminalCrystallite(aes)
     term._execute("(+ 1 2)")
     assert any("3" in line for line in term.lines)
 
@@ -315,7 +315,7 @@ def test_terminal_lisp_eval():
 def test_calculator():
     """Calculator processes basic arithmetic."""
     aes = _make_aes(640, 480)
-    calc = CalculatorCrystalet(aes)
+    calc = CalculatorCrystallite(aes)
     assert calc.win in aes._windows
 
     # 7 + 3 = 10
@@ -336,7 +336,7 @@ def test_calculator():
 def test_calculator_multiply():
     """Calculator handles multiplication chain."""
     aes = _make_aes(640, 480)
-    calc = CalculatorCrystalet(aes)
+    calc = CalculatorCrystallite(aes)
     # 6 * 7 = 42
     calc._press('6')
     calc._press('*')
@@ -347,9 +347,9 @@ def test_calculator_multiply():
 
 @test("desktop_clock", batch="phase10")
 def test_clock():
-    """Clock crystalet renders time."""
+    """Clock crystallite renders time."""
     aes = _make_aes(640, 480)
-    clock = ClockCrystalet(aes)
+    clock = ClockCrystallite(aes)
     assert clock.win in aes._windows
     # Redraw should set _last_time
     aes.redraw()
@@ -358,11 +358,11 @@ def test_clock():
 
 @test("desktop_full_desktop_redraw", batch="phase10")
 def test_full_desktop_redraw():
-    """Full desktop with all crystalets redraws correctly."""
+    """Full desktop with all crystallites redraws correctly."""
     aes = _make_aes(640, 480)
-    TerminalCrystalet(aes)
-    ClockCrystalet(aes)
-    CalculatorCrystalet(aes)
+    TerminalCrystallite(aes)
+    ClockCrystallite(aes)
+    CalculatorCrystallite(aes)
     aes.redraw()
     # Should not crash and fb should have content
     fb = aes.vdi.fb

@@ -14,7 +14,7 @@ Crystal is a desktop environment for Lispos, spiritually descended from Digital 
 | GEM Principle | Crystal Equivalent |
 |---|---|
 | **AES/VDI split** (UI policy vs. drawing) | Crystal AES (window/event manager) + VDI driver layer (drawing primitives, backed by HW blit engine) |
-| **Desk accessories** (system-owned, always-available micro-apps) | **Crystalets** — first-class, system-registered, available from any context |
+| **Desk accessories** (system-owned, always-available micro-apps) | **Crystallites** — first-class, system-registered, available from any context |
 | **Clipboard as inter-app protocol** (.SCP scrap directory) | **Scrap** — structured clipboard with type negotiation, history, persistence |
 | **UI defined as editable resources** (.RSC files) | **Resource objects** — menus, dialogs, alerts are Lisp data structures, live-editable, theme-swappable |
 | **Desktop state in config artifacts** (DESKTOP.INF) | **Desktop profile** — a serialized Lisp form, version-controlled, sync-able |
@@ -37,7 +37,7 @@ Crystal is a desktop environment for Lispos, spiritually descended from Digital 
 │   (Editor, File Manager, Terminal, Browser, Games, …)         │
 ├──────────────────────────────────────────────────────────────┤
 │                       Crystal AES                             │
-│   (Window manager, event dispatch, menu bar, Crystalets,      │
+│   (Window manager, event dispatch, menu bar, Crystallites,      │
 │    drag & drop, focus policy, z-order, keyboard shortcuts)     │
 ├──────────────────────────────────────────────────────────────┤
 │                      Resource System                          │
@@ -123,7 +123,7 @@ Each window has a **redraw function** (called by the AES when the window needs r
 The menu bar is global (like classic Mac/GEM). The active application's menu merges with the system menu:
 
 ```
-┌─ Crystal ─┬─ File ─┬─ Edit ─┬─ View ─┬─ (app menus…) ─┬─ Crystalets ─┐
+┌─ Crystal ─┬─ File ─┬─ Edit ─┬─ View ─┬─ (app menus…) ─┬─ Crystallites ─┐
 │  About…    │ New    │ Cut    │ Icons  │                 │  Clock       │
 │  Prefs…    │ Open…  │ Copy   │ List   │                 │  Calculator  │
 │  Shutdown  │ Save   │ Paste  │ Sort…  │                 │  Terminal    │
@@ -145,12 +145,12 @@ Menus are Lisp lists. Editing a menu is editing a list.
                (:item "Close"    :action file-close   :key "^W"))))
 ```
 
-#### 2.2.4 Crystalets (Desk Accessories)
+#### 2.2.4 Crystallites (Desk Accessories)
 
 System-registered micro-apps that live in their own windows but are always accessible, even when another application has focus. Like GEM desk accessories, but implemented as actors.
 
 ```lisp
-(defcrystalet clock
+(defcrystallite clock
   :title "Clock"
   :size (120 . 40)
   :redraw (lambda (win rect)
@@ -160,7 +160,7 @@ System-registered micro-apps that live in their own windows but are always acces
   :timer 1000)  ; redraw every second
 ```
 
-Standard Crystalets:
+Standard Crystallites:
 - **Clock** — always-visible time
 - **Calculator** — RPN or algebraic
 - **Terminal** — REPL in a window
@@ -250,7 +250,7 @@ The desktop actor:
 1. Owns the root window (background, icons).
 2. Manages the global menu bar.
 3. Routes events to the focused window's actor.
-4. Manages Crystalets (always-available accessories).
+4. Manages Crystallites (always-available accessories).
 5. Handles file manager duties (icon grid, drag-and-drop, file associations).
 6. Serializes/deserializes the desktop profile.
 
@@ -357,7 +357,7 @@ Crystal is built incrementally alongside the Lispos kernel:
 2. **Window manager** — window open/close/move/resize, z-order, redraw
 3. **Event system** — keyboard, mouse, timer events routed to windows
 4. **Menu bar** — global menu, menu item dispatch, keyboard shortcuts
-5. **Crystalets** — clock, calculator, terminal
+5. **Crystallites** — clock, calculator, terminal
 6. **File manager** — folder windows, icons, drag-and-drop
 7. **Resource editor** — edit dialogs, menus, icons visually
 8. **Theming** — theme objects, live switching

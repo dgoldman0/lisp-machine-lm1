@@ -29,7 +29,7 @@ from .desktop import (
     AES, Window, Colors, Menu, MenuItem,
     TITLE_BAR_H, BORDER_W, MENU_BAR_H,
     WIN_CLOSEABLE, WIN_MOVEABLE, WIN_RESIZABLE,
-    TerminalCrystalet, ClockCrystalet, CalculatorCrystalet,
+    TerminalCrystallite, ClockCrystallite, CalculatorCrystallite,
 )
 
 
@@ -162,11 +162,11 @@ class DesktopDriver:
     def setup_default_desktop(self) -> dict:
         """Create the default desktop with terminal, clock, calculator.
 
-        Returns dict of crystalet instances.
+        Returns dict of crystallite instances.
         """
-        terminal = TerminalCrystalet(self.aes, x=20, y=40, w=400, h=300)
-        clock = ClockCrystalet(self.aes, x=440, y=30)
-        calc = CalculatorCrystalet(self.aes, x=440, y=120)
+        terminal = TerminalCrystallite(self.aes, x=20, y=40, w=400, h=300)
+        clock = ClockCrystallite(self.aes, x=440, y=30)
+        calc = CalculatorCrystallite(self.aes, x=440, y=120)
         return {
             'terminal': terminal,
             'clock': clock,
