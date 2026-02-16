@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lm1-emu"
+version = "0.1.0"
+description = "LM-1 Lisp Machine Functional Emulator"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+[project.scripts]
+lm1 = "lm1.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lm1*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

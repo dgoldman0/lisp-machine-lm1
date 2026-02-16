@@ -125,38 +125,37 @@ Start with **1 tile, 1 thread** for initial bringup. Scale up once the BIOS and 
 
 ## 5. Emulator Loop
 
+```python
+def run(emu: Emulator) -> None:
+    while True:
+        tile = emu.schedule_tile()             # round-robin across tiles
+        thread = tile.schedule_thread()         # round-robin across threads
+
+        pc = thread.pc
+        instruction = tile.fetch(pc)            # read 32 bits from memory at pc
+        decoded = decode(instruction)           # extract opcode, fields
+
+        match decoded.family:
+            case F1_TAGGED_ARITH: exec_tagged_arith(tile, thread, decoded)
+            case F2_ALLOC:        exec_alloc(tile, thread, decoded)
+            case F3_FIELD_ACCESS: exec_field_access(tile, thread, decoded)
+            case F4_DISPATCH:     exec_dispatch(tile, thread, decoded)
+            case F5_PREFETCH:     pass  # no-op in emulator
+            case F6_CONCURRENCY:  exec_concurrency(tile, thread, decoded)
+            case F7_REGION_OPS:   exec_region_ops(tile, thread, decoded)
+            case F8_CAPABILITY:   trap(thread, TRAP_UNIMPLEMENTED)
+            case SCALAR:          exec_scalar(tile, thread, decoded)
+            case SYSTEM:          exec_system(tile, thread, decoded)
+
+        thread.cycle_count += 1
+
+        # Check for pending interrupts, GC requests, etc.
+        if thread.cycle_count % 1024 == 0:
+            check_interrupts(tile, thread)
 ```
-fn run(emu: &mut Emulator) {
-    loop {
-        let tile = emu.schedule_tile();          // round-robin across tiles
-        let thread = tile.schedule_thread();      // round-robin across threads
-        
-        let pc = thread.pc;
-        let instruction = tile.fetch(pc);         // read 32 bits from memory at pc
-        let decoded = decode(instruction);        // extract opcode, fields
-        
-        match decoded.family {
-            F1_TAGGED_ARITH => exec_tagged_arith(tile, thread, decoded),
-            F2_ALLOC        => exec_alloc(tile, thread, decoded),
-            F3_FIELD_ACCESS => exec_field_access(tile, thread, decoded),
-            F4_DISPATCH     => exec_dispatch(tile, thread, decoded),
-            F5_PREFETCH     => { /* no-op in emulator */ },
-            F6_CONCURRENCY  => exec_concurrency(tile, thread, decoded),
-            F7_REGION_OPS   => exec_region_ops(tile, thread, decoded),
-            F8_CAPABILITY   => trap(thread, TRAP_UNIMPLEMENTED),
-            SCALAR          => exec_scalar(tile, thread, decoded),
-            SYSTEM          => exec_system(tile, thread, decoded),
-        }
-        
-        thread.cycle_count += 1;
-        
-        // Check for pending interrupts, GC requests, etc.
-        if thread.cycle_count % 1024 == 0 {
-            check_interrupts(tile, thread);
-        }
-    }
-}
-```
+
+When the C++ accelerator is loaded, `run()` delegates to `_accel.run_loop(emu)` which
+implements the same logic in compiled C++ and only calls back into Python for traps and I/O.
 
 ## 6. Debug Interface
 
@@ -195,13 +194,29 @@ These traps are **not** part of the ISA spec — they're emulator-specific. The 
 
 ## 8. Implementation Language
 
-Rust or C. Leaning Rust:
-- Tagged word manipulation is all safe integer ops
-- Memory subsystem is a big `Vec<u64>` with bounds checking in debug mode
-- Pattern matching for decode is clean
-- Easy to add a socket-based debugger later
+Python + C++ acceleration.
 
-But C is fine too — the emulator is ~3000–5000 lines of straightforward code.
+**Core in Python:**
+- Clean, readable implementation of the ISA semantics
+- Rapid iteration during design — modify-and-run, no compile step
+- Tagged words as Python ints masked to 64-bit where needed
+- Memory subsystem backed by `array.array('Q', ...)` (unsigned 64-bit)
+- Match/case (Python 3.10+) for decode dispatch
+- Debug interface and CLI trivially built with Python's standard library
+
+**C++ extension for the hot loop:**
+- The fetch-decode-execute inner loop compiled as a CPython C extension (via `setuptools` / `setup.py`)
+- Provides 10–50× speedup over pure Python for sustained execution
+- Built by default with `pip install -e .`
+- Uses `numpy`-style `uint64` arrays or raw `malloc` for the memory backing store
+- Exposes the same API as the pure-Python fallback
+
+**PyPy fallback:**
+- If the C++ extension isn't available (e.g., no compiler on the system), the pure-Python code runs as-is
+- Under PyPy, the JIT gets the inner loop to ~5–15× over CPython, making it a viable fallback
+- Detection is automatic: `try: from lm1._accel import ...` / `except ImportError: <pure Python path>`
+
+Estimated size: ~2000–3000 lines Python, ~800–1200 lines C++.
 
 ## 9. Bringup Sequence
 
