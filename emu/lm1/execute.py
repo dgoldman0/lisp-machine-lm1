@@ -40,6 +40,7 @@ from .traps import (
     TRAP_NOT_FIXNUM, TRAP_FIXNUM_OVERFLOW, TRAP_DIVIDE_BY_ZERO,
     TRAP_TYPE_MISMATCH, TRAP_STACK_UNDERFLOW,
     TRAP_NURSERY_OVERFLOW, TRAP_NOT_REF,
+    TRAP_IC_MISS, TRAP_NOT_CLOSURE,
     TRAP_UNIMPLEMENTED,
     trap_name,
 )
@@ -110,6 +111,10 @@ class Emulator:
 
         # GC statistics
         self.gc_count = 0
+
+        # Inline cache table: (callsite_pc, shape_id) → code_entry_addr
+        # Per-tile hash map used for polymorphic dispatch.
+        self.ic_table: dict[tuple[int, int], int] = {}
 
         # Install default header templates (index 0 = cons)
         self._init_header_templates()
@@ -600,11 +605,131 @@ class Emulator:
             else:
                 t.regs[inst.rd] = NIL
 
+        # ================================================================
+        # Phase 4: Dispatch (Inline Cache)
+        # ================================================================
+
+        # ---- CALL.IC: inline-cache dispatch ----
+        elif op == Op.CALL_IC:
+            # Format I: Rd = receiver register, Rs1 = selector (shape comes
+            # from the object header).  imm16 is unused / reserved.
+            receiver = t.regs[inst.rd]
+            if not is_any_ref(receiver):
+                raise LM1Trap(TRAP_NOT_REF, "CALL.IC: receiver is not a ref")
+            addr = ref_address(receiver)
+            hdr = self.mem.load_word(addr)
+            shape = header_shape_id(hdr) if is_header(hdr) else 0
+            callsite = t.pc  # use current PC as callsite key
+            key = (callsite, shape)
+            target = self.ic_table.get(key)
+            if target is not None:
+                # IC hit — push frame and jump
+                self._push_frame(t, next_pc)
+                next_pc = target
+            else:
+                # IC miss — trap.  Handler should IC.INSTALL then ERET.
+                raise LM1Trap(TRAP_IC_MISS,
+                              f"IC miss: callsite={callsite:#x} shape={shape}")
+
+        # ---- IC.INSTALL: populate IC entry ----
+        elif op == Op.IC_INSTALL:
+            # Format R: Rs1 = receiver (for shape), Rs2 = code_entry register,
+            # Rd = callsite PC register.
+            receiver = t.regs[inst.rs1]
+            code_entry = t.regs[inst.rs2]
+            callsite = t.regs[inst.rd]
+            if is_any_ref(receiver):
+                addr = ref_address(receiver)
+                hdr = self.mem.load_word(addr)
+                shape = header_shape_id(hdr) if is_header(hdr) else 0
+            else:
+                shape = 0
+            self.ic_table[(callsite, shape)] = code_entry
+
+        # ---- CALL.DIRECT: direct call (no IC) ----
+        elif op == Op.CALL_DIRECT:
+            # Format I: Rd = unused, Rs1 = unused, imm16 = relative offset (words)
+            # Or: I-format with target address.
+            # Convention: imm16 is a signed word offset from current PC.
+            self._push_frame(t, next_pc)
+            offset = inst.imm16  # signed word offset
+            next_pc = t.pc + (offset * 4)
+
+        # ---- CALL.CLOSURE: call through closure object ----
+        elif op == Op.CALL_CLOSURE:
+            # Format I: Rd = closure register.
+            # Closure layout: [header][code_entry][env0][env1]...
+            closure_ref = t.regs[inst.rd]
+            if not is_any_ref(closure_ref):
+                raise LM1Trap(TRAP_NOT_CLOSURE, "CALL.CLOSURE: not a ref")
+            caddr = ref_address(closure_ref)
+            hdr = self.mem.load_word(caddr)
+            if not is_header(hdr) or header_subtype(hdr) != HDR_CLOSURE:
+                raise LM1Trap(TRAP_NOT_CLOSURE, "CALL.CLOSURE: not a closure")
+            code_entry = self.mem.load_word(caddr + 8)  # field 0 = code entry
+            self._push_frame(t, next_pc)
+            next_pc = code_entry
+
+        # ---- RET: return from call ----
+        elif op == Op.RET:
+            next_pc = self._pop_frame(t)
+
+        # ---- TAILCALL.IC: tail-call with inline cache ----
+        elif op == Op.TAILCALL_IC:
+            receiver = t.regs[inst.rd]
+            if not is_any_ref(receiver):
+                raise LM1Trap(TRAP_NOT_REF, "TAILCALL.IC: receiver is not a ref")
+            addr = ref_address(receiver)
+            hdr = self.mem.load_word(addr)
+            shape = header_shape_id(hdr) if is_header(hdr) else 0
+            callsite = t.pc
+            key = (callsite, shape)
+            target = self.ic_table.get(key)
+            if target is not None:
+                # Tail call: DON'T push a new frame, reuse current
+                next_pc = target
+            else:
+                raise LM1Trap(TRAP_IC_MISS,
+                              f"IC miss (tail): callsite={callsite:#x} shape={shape}")
+
+        # ---- TAILCALL.DIRECT: direct tail-call ----
+        elif op == Op.TAILCALL_DIR:
+            offset = inst.imm16
+            next_pc = t.pc + (offset * 4)
+            # No frame push — reuse current frame
+
         # ---- Not yet implemented ----
         else:
             raise LM1Trap(TRAP_UNIMPLEMENTED, f"Unimplemented opcode {op} ({op:#04x})")
 
         return next_pc
+
+    # -- Allocation helpers (Phase 2) ---
+
+    # -- Frame helpers (Phase 4) ---
+
+    def _push_frame(self, t: ThreadContext, return_addr: int) -> None:
+        """Push a call frame: save LR and FP on the stack, set FP = SP."""
+        # Push LR (return address)
+        t.sp = (t.sp - 8) & WORD_MASK
+        self.mem.store_word(t.sp, t.lr)
+        # Push FP (saved frame pointer)
+        t.sp = (t.sp - 8) & WORD_MASK
+        self.mem.store_word(t.sp, t.fp)
+        # Set up new frame
+        t.lr = return_addr
+        t.fp = t.sp
+
+    def _pop_frame(self, t: ThreadContext) -> int:
+        """Pop a call frame: restore FP and LR from stack, return the saved LR."""
+        return_addr = t.lr
+        # Restore FP and LR from stack
+        t.sp = t.fp
+        t.fp = self.mem.load_word(t.sp)
+        t.sp = (t.sp + 8) & WORD_MASK
+        t.lr = self.mem.load_word(t.sp)
+        t.sp = (t.sp + 8) & WORD_MASK
+        return return_addr
 
     # -- Allocation helpers (Phase 2) ---
 
