@@ -655,5 +655,9 @@ class Assembler:
             rd = self._reg(args[0], ln)
             rs = self._reg(args[1], ln)
             return encode_r(Op.ARITH_RAW, rd, rs, 0, FUNC_ADD)
+        if mn == 'JR':
+            # JR rs → jump to address in register (uses rd field for register)
+            rs = self._reg(args[0], ln)
+            return encode_x(Op.JR, rs << 21)
 
         raise AsmError(ln, f"unknown mnemonic: {mn}")

@@ -41,6 +41,7 @@ class Op(IntEnum):
     RET           = 0b011100  # 28
     TAILCALL_IC   = 0b011101  # 29
     TAILCALL_DIR  = 0b011110  # 30
+    JR            = 0b011111  # 31  Jump Register (absolute jump to Rs1)
 
     # Family 5 — Prefetch (no-ops in emulator)
     PREFETCH_REF  = 0b100000  # 32

@@ -57,6 +57,14 @@ from collections import deque
 EMU_TRAP_PUTCHAR   = 0x80
 EMU_TRAP_GETCHAR   = 0x81
 EMU_TRAP_BLOCK_IO  = 0x82
+EMU_TRAP_SET_TRAP_TABLE = 0x90    # BIOS: r1 = trap table base address
+EMU_TRAP_SET_TEMPLATE   = 0x91   # BIOS: r1 = index, r2 = 64-bit header value
+EMU_TRAP_DEBUG_PRINT    = 0x9F   # Debug: print string (r1=addr, r2=len)
+
+# Block I/O sub-functions (in r1)
+BLOCK_IO_READ  = 0
+BLOCK_IO_WRITE = 1
+BLOCK_SIZE     = 4096  # bytes per block
 
 
 class Emulator:
@@ -95,6 +103,7 @@ class Emulator:
         oldgen_size: int | None = None,
         tile_id: int = 0,
         num_threads: int = 1,
+        block_device: str | None = None,
     ):
         self.mem = Memory(mem_size)
         self.tile_id = tile_id
@@ -149,6 +158,9 @@ class Emulator:
         # Install default header templates (index 0 = cons)
         self._init_header_templates()
 
+        # Block device (Phase 7)
+        self.block_device_path: str | None = block_device
+
         # Stats
         self.instruction_count = 0
 
@@ -171,6 +183,11 @@ class Emulator:
         # Index 2: Vector header template (hdr_sub=2, size=0 — filled at alloc)
         t.header_templates[2] = make_header(HDR_VECTOR, 0, 2)
 
+    def load_bios(self, bios_words: list[int], base: int = 0) -> None:
+        """Load BIOS instruction words into memory and set PC to base."""
+        self.mem.load_instructions(base, bios_words)
+        for tc in self.threads:
+            tc.pc = base
     # -- Register / memory convenience ---
 
     def reg(self, idx: int) -> int:
@@ -717,6 +734,10 @@ class Emulator:
         elif op == Op.RET:
             next_pc = self._pop_frame(t)
 
+        # ---- JR: jump register (absolute jump to address in Rs1) ----
+        elif op == Op.JR:
+            next_pc = t.regs[inst.rd]  # register is in rd position (bits 25:21)
+
         # ---- TAILCALL.IC: tail-call with inline cache ----
         elif op == Op.TAILCALL_IC:
             receiver = t.regs[inst.rd]
@@ -1114,8 +1135,64 @@ class Emulator:
                 t.regs[0] = tag_fixnum(-1)  # EOF
 
         elif code == EMU_TRAP_BLOCK_IO:
-            # Phase 1: not implemented
-            raise LM1Trap(TRAP_UNIMPLEMENTED, "TRAP_BLOCK_IO not implemented in Phase 1")
+            # Block I/O: r1 = sub-function (0=read, 1=write)
+            #            r2 = block number
+            #            r3 = memory destination/source address
+            func = t.regs[1]
+            block_num = t.regs[2]
+            mem_addr = t.regs[3]
+            if self.block_device_path is None:
+                # No block device attached — return error in r0
+                t.regs[0] = tag_fixnum(-1)
+                return
+            import os
+            try:
+                if func == BLOCK_IO_READ:
+                    with open(self.block_device_path, 'rb') as f:
+                        f.seek(block_num * BLOCK_SIZE)
+                        data = f.read(BLOCK_SIZE)
+                    # Pad to BLOCK_SIZE if file is shorter
+                    if len(data) < BLOCK_SIZE:
+                        data = data + b'\x00' * (BLOCK_SIZE - len(data))
+                    # Write into emulator memory byte by byte
+                    for i, b in enumerate(data):
+                        self.mem.store_byte(mem_addr + i, b)
+                    t.regs[0] = tag_fixnum(0)  # success
+                elif func == BLOCK_IO_WRITE:
+                    # Read BLOCK_SIZE bytes from emulator memory
+                    data = bytearray(BLOCK_SIZE)
+                    for i in range(BLOCK_SIZE):
+                        data[i] = self.mem.load_byte(mem_addr + i)
+                    # Ensure file exists and write
+                    mode = 'r+b' if os.path.exists(self.block_device_path) else 'wb'
+                    with open(self.block_device_path, mode) as f:
+                        f.seek(block_num * BLOCK_SIZE)
+                        f.write(data)
+                    t.regs[0] = tag_fixnum(0)  # success
+                else:
+                    t.regs[0] = tag_fixnum(-2)  # unknown sub-function
+            except (IOError, OSError):
+                t.regs[0] = tag_fixnum(-1)  # I/O error
+
+        elif code == EMU_TRAP_SET_TRAP_TABLE:
+            # Set the trap table base address for the current thread
+            t.trap_table_base = t.regs[1]
+
+        elif code == EMU_TRAP_SET_TEMPLATE:
+            # Install a header template: r1 = index, r2 = 64-bit header value
+            idx = t.regs[1] & 0xFF
+            val = t.regs[2]
+            t.header_templates[idx] = val
+
+        elif code == EMU_TRAP_DEBUG_PRINT:
+            # Debug print: r1 = address of byte string, r2 = length
+            addr = t.regs[1]
+            length = t.regs[2]
+            chars = []
+            for i in range(length):
+                chars.append(chr(self.mem.load_byte(addr + i)))
+            self._stdout.write(''.join(chars))
+            self._stdout.flush()
 
         else:
             raise LM1Trap(code, f"Unhandled trap: {trap_name(code)}")
