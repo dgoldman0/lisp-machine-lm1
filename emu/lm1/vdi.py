@@ -1,9 +1,12 @@
 """LM-1 VDI (Virtual Device Interface) Display Engine.
 
-Provides a framebuffer-backed graphics system inspired by GEM VDI.
+32-bit RGBA truecolor framebuffer graphics system.
+Spiritual successor to GEM VDI — modern, no palette limitations.
+
 Features:
-  - 8-bit indexed-color framebuffer with 256-entry CLUT
-  - Drawing primitives: rect fill, bitblt, line, character/string
+  - 32-bit RGBA framebuffer (0xRRGGBB colors, alpha blending)
+  - Drawing primitives: rect fill, gradient rect, shadow rect, bitblt,
+    line, character/string
   - Hardware cursor overlay
   - Host display via pygame (optional headless mode for testing)
   - Event injection: keyboard/mouse from host → emulator
@@ -15,18 +18,20 @@ VDI functions are invoked via TRAP 0x83 with:
 
 Function codes:
   0  VDI_SET_MODE     r2=width, r3=height  → set resolution
-  1  VDI_FILL_RECT    r2=x, r3=y, r4=w, r5=h, r6=color_index
+  1  VDI_FILL_RECT    r2=x, r3=y, r4=w, r5=h, r6=color(0xRRGGBB)
   2  VDI_BLIT         r2=src_x, r3=src_y, r4=dst_x, r5=dst_y, r6=w, r7=h
-  3  VDI_SET_PALETTE  r2=index, r3=r, r4=g, r5=b
+  3  (reserved)
   4  VDI_DRAW_CHAR    r2=x, r3=y, r4=char_code, r5=fg, r6=bg
   5  VDI_DRAW_STRING  r2=x, r3=y, r4=str_addr, r5=len, r6=fg, r7=bg
   6  VDI_SET_CURSOR   r2=x, r3=y, r4=visible(0/1)
-  7  VDI_READ_PIXEL   r2=x, r3=y  → r1=color_index
+  7  VDI_READ_PIXEL   r2=x, r3=y  → r1=color(0xRRGGBB)
   8  VDI_DRAW_LINE    r2=x1, r3=y1, r4=x2, r5=y2, r6=color
   9  VDI_GET_MODE     → r1=width, r2=height
   10 VDI_SCROLL       r2=x, r3=y, r4=w, r5=h, r6=dx, r7=dy
-  11 VDI_PRESENT      Force display update (no-op in headless mode)
+  11 VDI_PRESENT      Force display update
   12 VDI_READ_EVENT   → r1=event_type, r2=data1, r3=data2
+  13 VDI_GRAD_RECT    r2=x, r3=y, r4=w, r5=h, r6=color1, r7=color2, r8=dir
+  14 VDI_SHADOW_RECT  r2=x, r3=y, r4=w, r5=h, r6=radius, r7=alpha
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ from typing import Optional
 VDI_SET_MODE     = 0
 VDI_FILL_RECT    = 1
 VDI_BLIT         = 2
-VDI_SET_PALETTE  = 3
+# 3 = reserved (was VDI_SET_PALETTE)
 VDI_DRAW_CHAR    = 4
 VDI_DRAW_STRING  = 5
 VDI_SET_CURSOR   = 6
@@ -49,6 +54,8 @@ VDI_GET_MODE     = 9
 VDI_SCROLL       = 10
 VDI_PRESENT      = 11
 VDI_READ_EVENT   = 12
+VDI_GRAD_RECT    = 13
+VDI_SHADOW_RECT  = 14
 
 # Event types
 EVT_NONE         = 0
@@ -60,42 +67,46 @@ EVT_MOUSE_UP     = 5
 EVT_QUIT         = 6
 EVT_TIMER        = 7
 
-# Default palette: CGA-inspired 16 colors + 240 grayscale ramp
-_DEFAULT_PALETTE = [
-    (0x00, 0x00, 0x00),  # 0  black
-    (0x00, 0x00, 0xAA),  # 1  dark blue
-    (0x00, 0xAA, 0x00),  # 2  dark green
-    (0x00, 0xAA, 0xAA),  # 3  dark cyan
-    (0xAA, 0x00, 0x00),  # 4  dark red
-    (0xAA, 0x00, 0xAA),  # 5  dark magenta
-    (0xAA, 0x55, 0x00),  # 6  brown
-    (0xAA, 0xAA, 0xAA),  # 7  light gray
-    (0x55, 0x55, 0x55),  # 8  dark gray
-    (0x55, 0x55, 0xFF),  # 9  blue
-    (0x55, 0xFF, 0x55),  # 10 green
-    (0x55, 0xFF, 0xFF),  # 11 cyan
-    (0xFF, 0x55, 0x55),  # 12 red
-    (0xFF, 0x55, 0xFF),  # 13 magenta
-    (0xFF, 0xFF, 0x55),  # 14 yellow
-    (0xFF, 0xFF, 0xFF),  # 15 white
-]
-# Fill remaining 240 indices with grayscale ramp
-for i in range(240):
-    v = (i * 255) // 239
-    _DEFAULT_PALETTE.append((v, v, v))
+
+# --- Color helpers ---
+
+def rgb(r: int, g: int, b: int) -> int:
+    """Pack RGB bytes into a 0xRRGGBB int."""
+    return ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF)
+
+def unpack_rgb(color: int) -> tuple[int, int, int]:
+    """Unpack a 0xRRGGBB int to (r, g, b)."""
+    return ((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF)
+
+def lerp_color(c1: int, c2: int, t: float) -> int:
+    """Linear interpolation between two RGB colors. t in [0, 1]."""
+    r1, g1, b1 = unpack_rgb(c1)
+    r2, g2, b2 = unpack_rgb(c2)
+    r = int(r1 + (r2 - r1) * t)
+    g = int(g1 + (g2 - g1) * t)
+    b = int(b1 + (b2 - b1) * t)
+    return rgb(r, g, b)
+
+def alpha_blend(fg: int, bg: int, alpha: int) -> int:
+    """Blend fg over bg with alpha (0=transparent, 255=opaque)."""
+    if alpha >= 255:
+        return fg
+    if alpha <= 0:
+        return bg
+    fr, fg_c, fb = unpack_rgb(fg)
+    br, bg_c, bb = unpack_rgb(bg)
+    a = alpha / 255.0
+    ia = 1.0 - a
+    return rgb(int(fr * a + br * ia), int(fg_c * a + bg_c * ia), int(fb * a + bb * ia))
 
 
 # Built-in 8×16 bitmap font (CP437-style, first 128 ASCII chars)
 # Each character is 8 pixels wide, 16 pixels tall = 16 bytes
-# Stored as list of 128 entries, each a tuple of 16 bytes (row bitmaps)
-# For space and brevity, we generate a minimal font with box-drawing approach
 def _make_minimal_font() -> list[bytes]:
     """Generate a minimal 8x16 bitmap font for printable ASCII."""
     font = []
     for ch in range(128):
         if 33 <= ch <= 126:
-            # Render a crude blocky glyph — each ASCII char gets a
-            # recognizable shape. For a real system we'd load a font file.
             rows = _render_ascii_glyph(ch)
         else:
             rows = bytes(16)  # blank for non-printable
@@ -124,13 +135,9 @@ def _gd(data: list[int]) -> bytes:
 
 
 def _render_ascii_glyph(ch: int) -> bytes:
-    """Render a single ASCII character as 8x16 bitmap.
-
-    Proper 16-row glyphs: design in top 8-10 rows, blank padding below.
-    Descender characters (g, j, p, q, y) extend into rows 8-9.
-    """
+    """Render a single ASCII character as 8x16 bitmap."""
     _GLYPH_DATA = {
-        # Digits — 8 rows of design, padded to 16
+        # Digits
         ord('0'): _g([0x00,0x3C,0x66,0x6E,0x76,0x66,0x3C,0x00]),
         ord('1'): _g([0x00,0x18,0x38,0x18,0x18,0x18,0x7E,0x00]),
         ord('2'): _g([0x00,0x3C,0x66,0x0C,0x18,0x30,0x7E,0x00]),
@@ -141,7 +148,7 @@ def _render_ascii_glyph(ch: int) -> bytes:
         ord('7'): _g([0x00,0x7E,0x06,0x0C,0x18,0x18,0x18,0x00]),
         ord('8'): _g([0x00,0x3C,0x66,0x3C,0x66,0x66,0x3C,0x00]),
         ord('9'): _g([0x00,0x3C,0x66,0x3E,0x06,0x0C,0x38,0x00]),
-        # Uppercase — 8 rows of design, padded to 16
+        # Uppercase
         ord('A'): _g([0x00,0x18,0x3C,0x66,0x7E,0x66,0x66,0x00]),
         ord('B'): _g([0x00,0x7C,0x66,0x7C,0x66,0x66,0x7C,0x00]),
         ord('C'): _g([0x00,0x3C,0x66,0x60,0x60,0x66,0x3C,0x00]),
@@ -168,7 +175,7 @@ def _render_ascii_glyph(ch: int) -> bytes:
         ord('X'): _g([0x00,0x66,0x3C,0x18,0x3C,0x66,0x66,0x00]),
         ord('Y'): _g([0x00,0x66,0x66,0x3C,0x18,0x18,0x18,0x00]),
         ord('Z'): _g([0x00,0x7E,0x0C,0x18,0x30,0x60,0x7E,0x00]),
-        # Lowercase — baseline at row 2, x-height ~5 rows
+        # Lowercase
         ord('a'): _g([0x00,0x00,0x00,0x3C,0x06,0x3E,0x66,0x3E]),
         ord('b'): _g([0x00,0x60,0x60,0x7C,0x66,0x66,0x7C,0x00]),
         ord('c'): _g([0x00,0x00,0x00,0x3C,0x66,0x60,0x66,0x3C]),
@@ -249,10 +256,15 @@ def _get_font() -> list[bytes]:
 CHAR_W = 8
 CHAR_H = 16
 
+# Gradient directions for VDI_GRAD_RECT
+GRAD_HORIZONTAL = 0
+GRAD_VERTICAL   = 1
+
 
 class VDI:
-    """Virtual Device Interface — framebuffer graphics engine.
+    """Virtual Device Interface — 32-bit RGBA truecolor framebuffer.
 
+    Colors are 0xRRGGBB integers throughout. No palette.
     Can operate in headless mode (for testing) or with a pygame
     display window (for interactive use).
     """
@@ -264,21 +276,18 @@ class VDI:
         self.scale = scale
         self.headless = headless
 
-        # 8-bit indexed framebuffer (row-major)
-        self.fb = bytearray(width * height)
-
-        # 256-entry palette: [(r, g, b), ...]
-        self.palette = list(_DEFAULT_PALETTE)
+        # 32-bit RGB framebuffer — stored as flat array of ints (0xRRGGBB)
+        self.fb = array.array('I', [0] * (width * height))
 
         # Hardware cursor
         self.cursor_x = 0
         self.cursor_y = 0
         self.cursor_visible = False
 
-        # Event queue (keyboard/mouse events from host)
-        self._events: list[tuple[int, int, int]] = []  # (type, data1, data2)
+        # Event queue
+        self._events: list[tuple[int, int, int]] = []
 
-        # Pygame surface (only if not headless)
+        # Pygame state
         self._screen = None
         self._surface = None
         self._dirty = True
@@ -310,7 +319,7 @@ class VDI:
         """Reinitialize framebuffer at new resolution."""
         self.width = width
         self.height = height
-        self.fb = bytearray(width * height)
+        self.fb = array.array('I', [0] * (width * height))
         self._dirty = True
         if self._screen is not None:
             import pygame
@@ -319,28 +328,75 @@ class VDI:
             self._surface = pygame.Surface((width, height))
 
     def fill_rect(self, x: int, y: int, w: int, h: int, color: int) -> None:
-        """Fill a rectangle with a palette index."""
-        color = color & 0xFF
-        # Clip
+        """Fill a rectangle with an RGB color (0xRRGGBB)."""
+        color = color & 0xFFFFFF
         x0 = max(0, x)
         y0 = max(0, y)
         x1 = min(self.width, x + w)
         y1 = min(self.height, y + h)
-        for row in range(y0, y1):
-            start = row * self.width + x0
-            end = row * self.width + x1
-            self.fb[start:end] = bytes([color]) * (x1 - x0)
+        row_w = x1 - x0
+        if row_w <= 0:
+            return
+        row = array.array('I', [color] * row_w)
+        for ry in range(y0, y1):
+            start = ry * self.width + x0
+            self.fb[start:start + row_w] = row
+        self._dirty = True
+
+    def grad_rect(self, x: int, y: int, w: int, h: int,
+                  color1: int, color2: int, direction: int = GRAD_VERTICAL) -> None:
+        """Fill a rectangle with a linear gradient between two RGB colors."""
+        x0 = max(0, x)
+        y0 = max(0, y)
+        x1 = min(self.width, x + w)
+        y1 = min(self.height, y + h)
+        rw = x1 - x0
+        rh = y1 - y0
+        if rw <= 0 or rh <= 0:
+            return
+
+        if direction == GRAD_VERTICAL:
+            span = max(1, h - 1)
+            for ry in range(y0, y1):
+                t = (ry - y) / span
+                c = lerp_color(color1, color2, t)
+                start = ry * self.width + x0
+                self.fb[start:start + rw] = array.array('I', [c] * rw)
+        else:  # GRAD_HORIZONTAL
+            span = max(1, w - 1)
+            for ry in range(y0, y1):
+                base = ry * self.width
+                for rx in range(x0, x1):
+                    t = (rx - x) / span
+                    self.fb[base + rx] = lerp_color(color1, color2, t)
+        self._dirty = True
+
+    def shadow_rect(self, x: int, y: int, w: int, h: int,
+                    radius: int = 4, alpha: int = 80) -> None:
+        """Draw a drop shadow behind a rectangle.
+
+        Draws a soft shadow offset to the bottom-right.
+        The shadow fills the region (x, y) → (x+w+radius, y+h+radius)
+        with the shadow body at (x+radius, y+radius, w, h).
+        """
+        shadow_color = 0x000000
+        # Fill the shadow body
+        for sy in range(y + radius, min(y + radius + h, self.height)):
+            for sx in range(x + radius, min(x + radius + w, self.width)):
+                if 0 <= sx < self.width and 0 <= sy < self.height:
+                    bg = self.fb[sy * self.width + sx]
+                    self.fb[sy * self.width + sx] = alpha_blend(shadow_color, bg, alpha)
         self._dirty = True
 
     def read_pixel(self, x: int, y: int) -> int:
-        """Read a single pixel's color index."""
+        """Read a single pixel's RGB color (0xRRGGBB)."""
         if 0 <= x < self.width and 0 <= y < self.height:
             return self.fb[y * self.width + x]
         return 0
 
     def draw_line(self, x1: int, y1: int, x2: int, y2: int, color: int) -> None:
         """Draw a line using Bresenham's algorithm."""
-        color = color & 0xFF
+        color = color & 0xFFFFFF
         dx = abs(x2 - x1)
         dy = abs(y2 - y1)
         sx = 1 if x1 < x2 else -1
@@ -364,7 +420,6 @@ class VDI:
     def blit(self, src_x: int, src_y: int, dst_x: int, dst_y: int,
              w: int, h: int) -> None:
         """Copy a rectangular region within the framebuffer."""
-        # Handle overlapping regions with direction-aware copy
         if dst_y < src_y or (dst_y == src_y and dst_x < src_x):
             rows = range(h)
         else:
@@ -388,7 +443,6 @@ class VDI:
                dx: int, dy: int) -> None:
         """Scroll a rectangular region by (dx, dy) pixels."""
         self.blit(x, y, x + dx, y + dy, w, h)
-        # Clear exposed area
         if dy > 0:
             self.fill_rect(x, y, w, min(dy, h), 0)
         elif dy < 0:
@@ -398,20 +452,14 @@ class VDI:
         elif dx < 0:
             self.fill_rect(max(x, x + w + dx), y, min(-dx, w), h, 0)
 
-    def set_palette_entry(self, index: int, r: int, g: int, b: int) -> None:
-        """Set a single palette entry."""
-        if 0 <= index < 256:
-            self.palette[index] = (r & 0xFF, g & 0xFF, b & 0xFF)
-            self._dirty = True
-
     def draw_char(self, x: int, y: int, ch: int, fg: int, bg: int) -> None:
         """Draw a single character using the built-in 8x16 font."""
         font = _get_font()
         if ch < 0 or ch >= len(font):
             ch = 0
         glyph = font[ch]
-        fg = fg & 0xFF
-        bg = bg & 0xFF
+        fg = fg & 0xFFFFFF
+        bg = bg & 0xFFFFFF
 
         for row in range(CHAR_H):
             if y + row < 0 or y + row >= self.height:
@@ -457,12 +505,12 @@ class VDI:
             return
         import pygame
 
-        # Convert indexed framebuffer to RGB surface
+        # Write RGB directly to surface
         for y in range(self.height):
             for x in range(self.width):
-                idx = self.fb[y * self.width + x]
-                color = self.palette[idx]
-                self._surface.set_at((x, y), color)
+                c = self.fb[y * self.width + x]
+                self._surface.set_at((x, y),
+                    ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF))
 
         # Draw cursor overlay
         if self.cursor_visible:
@@ -471,13 +519,11 @@ class VDI:
                 for dx in range(8):
                     px, py = cx + dx, cy + dy
                     if 0 <= px < self.width and 0 <= py < self.height:
-                        # Simple arrow cursor pattern
                         if dx <= dy and dx < 8:
-                            # XOR the pixel
                             r, g, b, _ = self._surface.get_at((px, py))
                             self._surface.set_at((px, py), (r ^ 255, g ^ 255, b ^ 255))
 
-        # Scale and blit to screen
+        # Scale and blit
         if self.scale == 1:
             self._screen.blit(self._surface, (0, 0))
         else:
@@ -534,9 +580,9 @@ class VDI:
     # Snapshot (for testing)
     # ------------------------------------------------------------------
 
-    def snapshot(self) -> bytes:
+    def snapshot(self) -> array.array:
         """Return a copy of the framebuffer."""
-        return bytes(self.fb)
+        return array.array('I', self.fb)
 
     def to_pil_image(self):
         """Convert framebuffer to a PIL Image (for debugging/export)."""
@@ -545,6 +591,6 @@ class VDI:
         pixels = img.load()
         for y in range(self.height):
             for x in range(self.width):
-                idx = self.fb[y * self.width + x]
-                pixels[x, y] = self.palette[idx]
+                c = self.fb[y * self.width + x]
+                pixels[x, y] = ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF)
         return img

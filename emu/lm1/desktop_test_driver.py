@@ -178,20 +178,20 @@ class DesktopDriver:
     # ------------------------------------------------------------------
 
     def get_pixel(self, x: int, y: int) -> int:
-        """Get framebuffer palette index at (x, y)."""
+        """Get framebuffer RGB color at (x, y) as 0xRRGGBB."""
         if 0 <= x < self.vdi.width and 0 <= y < self.vdi.height:
             return self.vdi.fb[y * self.vdi.width + x]
         return -1
 
     def get_pixel_rgb(self, x: int, y: int) -> tuple[int, int, int]:
-        """Get RGB color at (x, y)."""
-        idx = self.get_pixel(x, y)
-        if idx >= 0:
-            return self.vdi.palette[idx]
+        """Get (R, G, B) tuple at (x, y)."""
+        c = self.get_pixel(x, y)
+        if c >= 0:
+            return ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF)
         return (0, 0, 0)
 
     def region_colors(self, x: int, y: int, w: int, h: int) -> set[int]:
-        """Get the set of palette indices used in a rectangular region."""
+        """Get the set of 0xRRGGBB colors used in a rectangular region."""
         colors = set()
         for py in range(y, y + h):
             for px in range(x, x + w):

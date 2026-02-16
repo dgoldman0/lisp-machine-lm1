@@ -18,7 +18,7 @@ from typing import Callable, Optional
 import time
 
 from .vdi import (
-    VDI, CHAR_W, CHAR_H,
+    VDI, CHAR_W, CHAR_H, GRAD_VERTICAL,
     EVT_NONE, EVT_KEY_DOWN, EVT_KEY_UP,
     EVT_MOUSE_MOVE, EVT_MOUSE_DOWN, EVT_MOUSE_UP, EVT_QUIT, EVT_TIMER,
 )
@@ -29,33 +29,35 @@ from .vdi import (
 # ===================================================================
 
 class Colors:
-    """Palette indices for the desktop theme."""
-    BLACK       = 0
-    WHITE       = 15
-    LIGHT_GRAY  = 7
-    DARK_GRAY   = 8
-    BLUE        = 1
-    CYAN        = 3
-    GREEN       = 2
-    RED         = 4
-    YELLOW      = 14
-    MAGENTA     = 5
+    """0xRRGGBB color constants for the desktop theme."""
+    BLACK       = 0x000000
+    WHITE       = 0xFFFFFF
+    LIGHT_GRAY  = 0xC0C0C0
+    DARK_GRAY   = 0x606060
+    BLUE        = 0x2060A0
+    CYAN        = 0x00AAAA
+    GREEN       = 0x00CC44
+    RED         = 0xCC2222
+    YELLOW      = 0xEECC00
+    MAGENTA     = 0xAA00AA
 
     # Semantic colors
-    DESKTOP_BG      = 1    # dark blue
-    TITLE_BAR_ACTIVE = 9   # bright blue
-    TITLE_BAR_INACTIVE = 8 # dark gray
-    TITLE_TEXT       = 15  # white
-    WINDOW_BG        = 15  # white
-    WINDOW_BORDER    = 0   # black
-    MENU_BAR_BG      = 7   # light gray
-    MENU_BAR_TEXT    = 0   # black
-    MENU_HIGHLIGHT   = 9   # bright blue
-    MENU_HI_TEXT     = 15  # white
-    BUTTON_BG        = 7   # light gray
-    BUTTON_TEXT      = 0   # black
-    SCROLLBAR_BG     = 7   # light gray
-    SCROLLBAR_FG     = 8   # dark gray
+    DESKTOP_BG           = 0x206060   # teal-blue (GEM-inspired)
+    DESKTOP_ACCENT       = 0x287070   # slightly lighter for crosshatch
+    TITLE_BAR_ACTIVE     = 0x2255BB   # deeper blue
+    TITLE_BAR_ACTIVE_END = 0x104488   # gradient end for active title
+    TITLE_BAR_INACTIVE   = 0x808080   # gray
+    TITLE_TEXT            = 0xFFFFFF   # white
+    WINDOW_BG            = 0xFFFFFF   # white
+    WINDOW_BORDER        = 0x000000   # black
+    MENU_BAR_BG          = 0xE0E0E0   # light gray
+    MENU_BAR_TEXT         = 0x000000   # black
+    MENU_HIGHLIGHT       = 0x2255BB   # bright blue
+    MENU_HI_TEXT          = 0xFFFFFF   # white
+    BUTTON_BG            = 0xC0C0C0   # light gray
+    BUTTON_TEXT           = 0x000000   # black
+    SCROLLBAR_BG         = 0xC0C0C0   # light gray
+    SCROLLBAR_FG         = 0x808080   # dark gray
 
 
 # ===================================================================
@@ -205,13 +207,8 @@ class AES:
         self._init_desktop_pattern()
 
     def _init_desktop_pattern(self) -> None:
-        """Set up custom palette entries for desktop theme."""
-        # Desktop background: teal-blue (Atari ST / GEM inspired)
-        self.vdi.set_palette_entry(1, 0x20, 0x60, 0x60)
-        # Active title bar: deeper blue
-        self.vdi.set_palette_entry(9, 0x22, 0x55, 0xBB)
-        # Desktop pattern accent (slightly lighter than bg)
-        self.vdi.set_palette_entry(16, 0x28, 0x70, 0x70)
+        """No-op — palette-free system, colors are direct RGB."""
+        pass
 
     # ------------------------------------------------------------------
     # Window management
@@ -280,7 +277,7 @@ class AES:
         for py in range(0, vdi.height, 8):
             for px in range(0, vdi.width, 8):
                 if 0 <= px < vdi.width and 0 <= py < vdi.height:
-                    vdi.fb[py * vdi.width + px] = 16  # accent dot
+                    vdi.fb[py * vdi.width + px] = Colors.DESKTOP_ACCENT
 
         # 2. Windows (bottom to top)
         for win in self._windows:
@@ -306,9 +303,17 @@ class AES:
         vdi.fill_rect(win.x, win.y, win.w, win.h, Colors.WINDOW_BORDER)
 
         # Title bar background
-        title_bg = Colors.TITLE_BAR_ACTIVE if is_active else Colors.TITLE_BAR_INACTIVE
-        vdi.fill_rect(win.x + 1, win.y + 1,
-                       win.w - 2, TITLE_BAR_H - 1, title_bg)
+        if is_active:
+            vdi.grad_rect(win.x + 1, win.y + 1,
+                          win.w - 2, TITLE_BAR_H - 1,
+                          Colors.TITLE_BAR_ACTIVE,
+                          Colors.TITLE_BAR_ACTIVE_END,
+                          GRAD_VERTICAL)
+            title_bg = Colors.TITLE_BAR_ACTIVE
+        else:
+            vdi.fill_rect(win.x + 1, win.y + 1,
+                          win.w - 2, TITLE_BAR_H - 1, Colors.TITLE_BAR_INACTIVE)
+            title_bg = Colors.TITLE_BAR_INACTIVE
 
         # Close button (if closeable)
         if win.flags & WIN_CLOSEABLE:

@@ -1213,10 +1213,10 @@ class Emulator:
         Returns results in r1 (and sometimes r2, r3) as tagged fixnums.
         """
         from .vdi import (
-            VDI_SET_MODE, VDI_FILL_RECT, VDI_BLIT, VDI_SET_PALETTE,
+            VDI_SET_MODE, VDI_FILL_RECT, VDI_BLIT,
             VDI_DRAW_CHAR, VDI_DRAW_STRING, VDI_SET_CURSOR, VDI_READ_PIXEL,
             VDI_DRAW_LINE, VDI_GET_MODE, VDI_SCROLL, VDI_PRESENT,
-            VDI_READ_EVENT,
+            VDI_READ_EVENT, VDI_GRAD_RECT, VDI_SHADOW_RECT,
         )
         t = self.thread
         if self.vdi is None:
@@ -1238,9 +1238,6 @@ class Emulator:
             t.regs[1] = tag_fixnum(0)
         elif func == VDI_BLIT:
             vdi.blit(arg(2), arg(3), arg(4), arg(5), arg(6), arg(7))
-            t.regs[1] = tag_fixnum(0)
-        elif func == VDI_SET_PALETTE:
-            vdi.set_palette_entry(arg(2), arg(3), arg(4), arg(5))
             t.regs[1] = tag_fixnum(0)
         elif func == VDI_DRAW_CHAR:
             vdi.draw_char(arg(2), arg(3), arg(4), arg(5), arg(6))
@@ -1275,6 +1272,14 @@ class Emulator:
             t.regs[1] = tag_fixnum(evt_type)
             t.regs[2] = tag_fixnum(data1)
             t.regs[3] = tag_fixnum(data2)
+        elif func == VDI_GRAD_RECT:
+            vdi.grad_rect(arg(2), arg(3), arg(4), arg(5),
+                          arg(6), arg(7), arg(8))
+            t.regs[1] = tag_fixnum(0)
+        elif func == VDI_SHADOW_RECT:
+            vdi.shadow_rect(arg(2), arg(3), arg(4), arg(5),
+                            arg(6), arg(7))
+            t.regs[1] = tag_fixnum(0)
         else:
             # Unknown VDI function
             t.regs[1] = tag_fixnum(-1)

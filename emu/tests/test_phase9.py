@@ -19,12 +19,14 @@ from lm1.word import (
 )
 from lm1.vdi import (
     VDI,
-    VDI_SET_MODE, VDI_FILL_RECT, VDI_BLIT, VDI_SET_PALETTE,
+    VDI_SET_MODE, VDI_FILL_RECT, VDI_BLIT,
     VDI_DRAW_CHAR, VDI_DRAW_STRING, VDI_SET_CURSOR, VDI_READ_PIXEL,
     VDI_DRAW_LINE, VDI_GET_MODE, VDI_SCROLL, VDI_PRESENT,
-    VDI_READ_EVENT,
+    VDI_READ_EVENT, VDI_GRAD_RECT, VDI_SHADOW_RECT,
     EVT_NONE, EVT_KEY_DOWN, EVT_QUIT,
     CHAR_W, CHAR_H,
+    GRAD_VERTICAL, GRAD_HORIZONTAL,
+    rgb, unpack_rgb, lerp_color, alpha_blend,
 )
 
 # -------------------------------------------------------------------
@@ -152,13 +154,20 @@ def test_vdi_draw_string():
     assert i_pixels > 0, "'i' should have foreground pixels"
 
 
-@test("vdi_palette", batch="phase9_vdi_unit")
-def test_vdi_palette():
-    """set_palette_entry changes palette."""
+@test("vdi_grad_rect", batch="phase9_vdi_unit")
+def test_vdi_grad_rect():
+    """grad_rect produces a vertical gradient between two colors."""
     vdi = VDI(width=16, height=16, headless=True)
-    assert vdi.palette[0] == (0, 0, 0)
-    vdi.set_palette_entry(0, 0xFF, 0x80, 0x40)
-    assert vdi.palette[0] == (0xFF, 0x80, 0x40)
+    c1 = rgb(255, 0, 0)  # red
+    c2 = rgb(0, 0, 255)  # blue
+    vdi.grad_rect(0, 0, 16, 16, c1, c2, GRAD_VERTICAL)
+    # Top row should be pure red
+    assert vdi.read_pixel(0, 0) == c1
+    # Bottom row should be pure blue
+    assert vdi.read_pixel(0, 15) == c2
+    # Middle rows should be blended
+    mid = vdi.read_pixel(0, 7)
+    assert mid != c1 and mid != c2, "Middle should be blended"
 
 
 @test("vdi_blit_copy", batch="phase9_vdi_unit")
@@ -448,23 +457,31 @@ _start:
     assert untag_fixnum(emu.thread.regs[1]) == EVT_NONE
 
 
-@test("trap_vdi_set_palette", batch="phase9_trap")
-def test_trap_vdi_set_palette():
-    """TRAP 0x83 with VDI_SET_PALETTE changes a palette entry."""
+@test("trap_vdi_grad_rect", batch="phase9_trap")
+def test_trap_vdi_grad_rect():
+    """TRAP 0x83 with VDI_GRAD_RECT fills a gradient rectangle."""
+    # Use small color values that fit in 16-bit LI immediates
+    c1 = 100   # 0x000064 (near-black blue)
+    c2 = 200   # 0x0000C8 (slightly brighter blue)
     asm = f"""\
 _start:
     LI sp, 0x3FF8
-    ; Set palette[0] = (0x12, 0x34, 0x56)
-    LI r1, {VDI_SET_PALETTE * 2}
+    ; VDI_GRAD_RECT: r1=func(13), r2=x, r3=y, r4=w, r5=h, r6=c1, r7=c2, r8=dir
+    LI r1, {VDI_GRAD_RECT * 2}
     LI r2, {0 * 2}
-    LI r3, {0x12 * 2}
-    LI r4, {0x34 * 2}
-    LI r5, {0x56 * 2}
+    LI r3, {0 * 2}
+    LI r4, {16 * 2}
+    LI r5, {16 * 2}
+    LI r6, {c1 * 2}
+    LI r7, {c2 * 2}
+    LI r8, {GRAD_VERTICAL * 2}
     TRAP 0x83
     HALT
 """
     vdi, emu, out = _asm_run(asm)
-    assert vdi.palette[0] == (0x12, 0x34, 0x56)
+    # Top should be c1, bottom should be c2
+    assert vdi.read_pixel(0, 0) == c1
+    assert vdi.read_pixel(0, 15) == c2
 
 
 @test("trap_vdi_scroll_region", batch="phase9_trap")
