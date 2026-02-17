@@ -58,6 +58,7 @@ EMU_TRAP_PUTCHAR   = 0x80
 EMU_TRAP_GETCHAR   = 0x81
 EMU_TRAP_BLOCK_IO  = 0x82
 EMU_TRAP_VDI       = 0x83
+EMU_TRAP_MEM_BYTE  = 0x84  # Byte-level memory: r1=sub(0=load,1=store), r2=addr, r3=offset, r4=value
 EMU_TRAP_SET_TRAP_TABLE = 0x90    # BIOS: r1 = trap table base address
 EMU_TRAP_SET_TEMPLATE   = 0x91   # BIOS: r1 = index, r2 = 64-bit header value
 EMU_TRAP_DEBUG_PRINT    = 0x9F   # Debug: print string (r1=addr, r2=len)
@@ -1197,6 +1198,25 @@ class Emulator:
 
         elif code == EMU_TRAP_VDI:
             self._handle_vdi_trap()
+
+        elif code == EMU_TRAP_MEM_BYTE:
+            # Byte-level memory access:
+            #   r1 = sub-function: 0=load_byte, 1=store_byte
+            #   r2 = base address (raw)
+            #   r3 = byte offset (tagged fixnum)
+            #   r4 = value to store (tagged fixnum, for store only)
+            sub = untag_fixnum(t.regs[1]) if is_fixnum(t.regs[1]) else int(t.regs[1])
+            addr = t.regs[2]
+            offset = untag_fixnum(t.regs[3]) if is_fixnum(t.regs[3]) else int(t.regs[3])
+            if sub == 0:
+                # Load byte → return as tagged fixnum in r1
+                byte_val = self.mem.load_byte(addr + offset)
+                t.regs[1] = tag_fixnum(byte_val)
+            elif sub == 1:
+                # Store byte
+                val = untag_fixnum(t.regs[4]) if is_fixnum(t.regs[4]) else int(t.regs[4])
+                self.mem.store_byte(addr + offset, val & 0xFF)
+                t.regs[1] = tag_fixnum(0)  # success
 
         elif code == EMU_TRAP_DEBUG_PRINT:
             # Debug print: r1 = address of byte string, r2 = length

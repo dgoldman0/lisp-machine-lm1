@@ -420,3 +420,79 @@ def test_tco_factorial_accum():
     """)
     out, _ = _compile_direct(forms, max_instructions=500_000)
     assert _last_line(out) == "3628800"
+
+
+# ===================================================================
+# Stage 3: Strings and characters
+# ===================================================================
+
+@test("string_literal", batch="phase14_stage3")
+def test_string_literal():
+    """String literals stored in data section and address loaded."""
+    forms = parse('(defun main () "hello")')
+    cc = Compiler()
+    cc.compile_toplevel(forms)
+    src = cc.get_output()
+    assert "__str_" in src
+    assert "String Data" in src
+
+
+@test("string_length", batch="phase14_stage3")
+def test_string_length():
+    """(string-length str) returns tagged fixnum length."""
+    forms = parse("""
+        (defun main ()
+          (print-fixnum (string-length "hello")))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "5"
+
+
+@test("string_ref", batch="phase14_stage3")
+def test_string_ref():
+    """(string-ref str idx) returns char code at index."""
+    forms = parse("""
+        (defun main ()
+          (print-fixnum (string-ref "ABCDE" 0))
+          (print-fixnum (string-ref "ABCDE" 4)))
+    """)
+    out, _ = _compile_direct(forms)
+    # 'A' = 65, 'E' = 69
+    assert out == "6569"
+
+
+@test("print_string", batch="phase14_stage3")
+def test_print_string():
+    """(print-string str) prints the string content."""
+    forms = parse("""
+        (defun main ()
+          (print-string "hello world"))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "hello world"
+
+
+@test("string_ref_loop", batch="phase14_stage3")
+def test_string_ref_loop():
+    """Loop through string chars and print each one."""
+    forms = parse("""
+        (defun main ()
+          (let ((s "ABC"))
+            (dotimes (i 3)
+              (putchar (string-ref s i)))))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "ABC"
+
+
+@test("char_identity", batch="phase14_stage3")
+def test_char_identity():
+    """char->fixnum and fixnum->char are identity ops."""
+    forms = parse("""
+        (defun main ()
+          (print-fixnum (char->fixnum 65))
+          (putchar (fixnum->char 66)))
+    """)
+    out, _ = _compile_direct(forms)
+    # print-fixnum(65) = "65", putchar(66) = "B"
+    assert out == "65B"

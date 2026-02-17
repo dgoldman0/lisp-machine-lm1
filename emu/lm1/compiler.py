@@ -159,7 +159,9 @@ class Compiler:
                       'set-car!', 'set-cdr!', '=', '<', '>',
                       '>=', '<=', 'mod', 'rem',
                       'print-fixnum', 'print', 'newline',
-                      'putchar'):
+                      'putchar',
+                      'string-length', 'string-ref', 'string-set!',
+                      'print-string', 'char->fixnum', 'fixnum->char'):
             self._builtins.add(name)
 
     def _label(self, prefix: str = "L") -> str:
@@ -192,9 +194,9 @@ class Compiler:
             result.append("; ===== String Data =====")
             for label, text in self._string_table:
                 result.append(f"{label}:")
-                # Encode as: length word, then characters as bytes, then padding
+                # Encode as: length word (tagged fixnum), then character bytes, then padding
                 encoded = text.encode('utf-8')
-                result.append(f"    .WORD {len(encoded)}")
+                result.append(f"    .WORD {tag_fixnum(len(encoded))}")
                 for ch in encoded:
                     result.append(f"    .BYTE {ch}")
                 result.append(f"    .BYTE 0")  # null terminator
@@ -821,6 +823,57 @@ class Compiler:
             # These are inlined as CALL.DIRECT to the runtime functions
             self._compile_call([op] + args, env, dest)
             return
+        elif op == 'string-length':
+            # (string-length str) → load length word from str address
+            # String format: [tagged-fixnum-length] [bytes...]
+            self._compile_expr(args[0], env, dest=dest)
+            self._emit_instr(f"LDR r{dest}, r{dest}, 0")
+        elif op == 'string-ref':
+            # (string-ref str idx) → byte at str + 8 + idx
+            # Uses TRAP 0x84: r1=0(load), r2=addr+8, r3=offset(tagged idx)
+            self._compile_expr(args[0], env, dest=self.SCRATCH_REGS[0])
+            self._compile_expr(args[1], env, dest=self.SCRATCH_REGS[1])
+            # addr + 8 to skip the length word
+            self._emit_instr(f"LI r{self.SCRATCH_REGS[3]}, 8")
+            self._emit_instr(f"ADD r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[3]}")
+            self._emit_instr(f"LI r1, 0")       # sub=0 (load byte)
+            self._emit_instr(f"MOV r2, r{self.SCRATCH_REGS[0]}")  # base = str + 8
+            self._emit_instr(f"MOV r3, r{self.SCRATCH_REGS[1]}")  # offset = idx (tagged)
+            self._emit_instr("TRAP 0x84")
+            if dest != 1:
+                self._emit_instr(f"MOV r{dest}, r1")  # result in r1
+        elif op == 'string-set!':
+            # (string-set! str idx val) → store byte
+            self._compile_expr(args[0], env, dest=self.SCRATCH_REGS[0])
+            self._compile_expr(args[1], env, dest=self.SCRATCH_REGS[1])
+            self._compile_expr(args[2], env, dest=self.SCRATCH_REGS[2])
+            self._emit_instr(f"LI r{self.SCRATCH_REGS[3]}, 8")
+            self._emit_instr(f"ADD r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[3]}")
+            self._emit_instr(f"LI r1, {tag_fixnum(1)}")  # sub=1 (store byte)
+            self._emit_instr(f"MOV r2, r{self.SCRATCH_REGS[0]}")
+            self._emit_instr(f"MOV r3, r{self.SCRATCH_REGS[1]}")
+            self._emit_instr(f"MOV r4, r{self.SCRATCH_REGS[2]}")
+            self._emit_instr("TRAP 0x84")
+            self._emit_instr(f"LI r{dest}, 5")  # return NIL
+        elif op == 'print-string':
+            # (print-string str) → TRAP 0x9F (debug print: r1=addr+8, r2=length)
+            self._compile_expr(args[0], env, dest=self.SCRATCH_REGS[0])
+            # Load length (tagged fixnum at str+0)
+            self._emit_instr(f"LDR r2, r{self.SCRATCH_REGS[0]}, 0")
+            # Untag length: >>1 (SHR r2, r2, 1)
+            self._emit_instr(f"LI r{self.SCRATCH_REGS[1]}, 1")
+            self._emit_instr(f"SHR r2, r2, r{self.SCRATCH_REGS[1]}")
+            # Address of chars = str + 8
+            self._emit_instr(f"LI r{self.SCRATCH_REGS[2]}, 8")
+            self._emit_instr(f"ADD r1, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[2]}")
+            self._emit_instr("TRAP 0x9F")
+            self._emit_instr(f"LI r{dest}, 5")  # return NIL
+        elif op == 'char->fixnum':
+            # Characters are represented as fixnums — identity
+            self._compile_expr(args[0], env, dest=dest)
+        elif op == 'fixnum->char':
+            # Identity
+            self._compile_expr(args[0], env, dest=dest)
         else:
             raise CompilerError(f"Unknown builtin: {op}")
 
