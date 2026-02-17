@@ -39,6 +39,7 @@ module lm1_tb;
     logic [3:0]         gc_cmd_op;
     logic [XLEN-1:0]   gc_cmd_arg0;
     logic [XLEN-1:0]   gc_cmd_arg1;
+    logic [XLEN-1:0]   gc_cmd_arg2;
 
     // Message queue external port (stub)
     logic [XLEN-1:0]   ext_mq_rd_data;
@@ -46,6 +47,12 @@ module lm1_tb;
     logic               ext_mq_wr_ready;
     logic [3:0]         mq_empty;
     logic [3:0]         mq_full;
+
+    // Crossbar port (stub — no cluster SRAM in standalone test)
+    logic               xbar_req_valid;
+    logic               xbar_req_we;
+    logic [XLEN-1:0]   xbar_req_addr;
+    logic [XLEN-1:0]   xbar_req_wdata;
 
     // DUT
     lm1_cpu #(
@@ -70,6 +77,7 @@ module lm1_tb;
         .gc_cmd_op     (gc_cmd_op),
         .gc_cmd_arg0   (gc_cmd_arg0),
         .gc_cmd_arg1   (gc_cmd_arg1),
+        .gc_cmd_arg2   (gc_cmd_arg2),
         .gc_cmd_ready  (1'b1),
         .gc_engine_busy(1'b0),
         // External message queue — not connected
@@ -83,7 +91,15 @@ module lm1_tb;
         .ext_mq_rd_valid(ext_mq_rd_valid),
         // Queue status
         .mq_empty      (mq_empty),
-        .mq_full       (mq_full)
+        .mq_full       (mq_full),
+        // Crossbar — tied off (no cluster SRAM in standalone test)
+        .xbar_req_valid (xbar_req_valid),
+        .xbar_req_we    (xbar_req_we),
+        .xbar_req_addr  (xbar_req_addr),
+        .xbar_req_wdata (xbar_req_wdata),
+        .xbar_req_ready (1'b1),
+        .xbar_resp_data ({XLEN{1'b0}}),
+        .xbar_resp_valid(1'b0)
     );
 
     // Clock generation

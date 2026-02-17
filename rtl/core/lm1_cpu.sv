@@ -59,6 +59,7 @@ module lm1_cpu
     output logic [3:0]         gc_cmd_op,
     output logic [XLEN-1:0]   gc_cmd_arg0,
     output logic [XLEN-1:0]   gc_cmd_arg1,
+    output logic [XLEN-1:0]   gc_cmd_arg2,
     input  logic               gc_cmd_ready,
     input  logic               gc_engine_busy,
 
@@ -74,7 +75,16 @@ module lm1_cpu
 
     // --- Queue status ---
     output logic [3:0]         mq_empty,
-    output logic [3:0]         mq_full
+    output logic [3:0]         mq_full,
+
+    // --- Cluster crossbar port (for addresses beyond local SRAM) ---
+    output logic               xbar_req_valid,
+    output logic               xbar_req_we,
+    output logic [XLEN-1:0]   xbar_req_addr,
+    output logic [XLEN-1:0]   xbar_req_wdata,
+    input  logic               xbar_req_ready,
+    input  logic [XLEN-1:0]   xbar_resp_data,
+    input  logic               xbar_resp_valid
 );
 
     // ---------------------------------------------------------------
@@ -87,9 +97,9 @@ module lm1_cpu
 
     // Register file ports
     logic               rf_we;
-    logic [REG_IDX_W-1:0] rf_w_addr;
+    logic [FULL_REG_W-1:0] rf_w_addr;
     logic [XLEN-1:0]   rf_w_data;
-    logic [REG_IDX_W-1:0] rf_rd1_addr, rf_rd2_addr;
+    logic [FULL_REG_W-1:0] rf_rd1_addr, rf_rd2_addr;
     logic [XLEN-1:0]   rf_rd1_data, rf_rd2_data;
 
     // ALU
@@ -157,20 +167,30 @@ module lm1_cpu
     logic               ctr_ic_miss_inc;
     logic               ctr_nursery_ovf_inc;
 
+    // I-Cache wires
+    logic               icache_fetch_req, icache_fetch_valid;
+    logic [XLEN-1:0]   icache_fetch_addr;
+    logic [ILEN-1:0]   icache_fetch_inst;
+    logic               icache_fill_req, icache_fill_valid, icache_fill_done;
+    logic [XLEN-1:0]   icache_fill_addr, icache_fill_data;
+
+    // Instruction latch control (driven by control FSM)
+    logic               inst_latch_en;
+    logic [ILEN-1:0]   inst_latch_data;
+
     // ---------------------------------------------------------------
     // Decoder: not used as control classification signals
     // ---------------------------------------------------------------
-    // Instruction latch: capture the 32-bit instruction word from the
-    // LSU when the fetch response is valid.  The decoder is driven from
-    // this register (stable in S_DECODE), not the transient lsu_inst
-    // which is only combinationally valid during LSU_WAIT_RD.
+    // Instruction latch: capture the 32-bit instruction word.
+    // Updated by the control FSM via inst_latch_en/data (from I-Cache
+    // hit or LSU fallback).
     // ---------------------------------------------------------------
     logic [ILEN-1:0] inst_latched;
     always_ff @(posedge clk) begin
         if (!rst_n)
             inst_latched <= '0;
-        else if (lsu_valid)
-            inst_latched <= lsu_inst;
+        else if (inst_latch_en)
+            inst_latched <= inst_latch_data;
     end
 
     // ---------------------------------------------------------------
@@ -310,6 +330,78 @@ module lm1_cpu
     );
 
     // ---------------------------------------------------------------
+    // Instruction Cache — 8 KiB direct-mapped
+    // ---------------------------------------------------------------
+    lm1_icache u_icache (
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .fetch_req   (icache_fetch_req),
+        .fetch_addr  (icache_fetch_addr),
+        .fetch_valid (icache_fetch_valid),
+        .fetch_inst  (icache_fetch_inst),
+        .fill_req    (icache_fill_req),
+        .fill_addr   (icache_fill_addr),
+        .fill_valid  (icache_fill_valid),
+        .fill_data   (icache_fill_data),
+        .fill_done   (icache_fill_done)
+    );
+
+    // I-Cache fill sequencer
+    // Reads 8 sequential 64-bit words from SRAM to fill a cache line.
+    // Active only when the I-Cache asserts fill_req (cache miss).
+    typedef enum logic [1:0] {
+        ICFILL_IDLE,
+        ICFILL_READ,
+        ICFILL_RESP
+    } icfill_state_t;
+
+    icfill_state_t icfill_state;
+    logic [2:0]    icfill_cnt;
+    logic [MEM_DEPTH_LOG2-1:0] icfill_base;
+
+    logic               icfill_sram_en;
+    logic [MEM_DEPTH_LOG2-1:0] icfill_sram_addr;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            icfill_state <= ICFILL_IDLE;
+            icfill_cnt   <= '0;
+            icfill_base  <= '0;
+        end else begin
+            case (icfill_state)
+                ICFILL_IDLE: begin
+                    if (icache_fill_req) begin
+                        // fill_addr is byte address; convert to word address
+                        icfill_base  <= icache_fill_addr[MEM_DEPTH_LOG2+2:3];
+                        icfill_cnt   <= 3'd0;
+                        icfill_state <= ICFILL_READ;
+                    end
+                end
+                ICFILL_READ: begin
+                    // SRAM read issued this cycle; wait 1 cycle for data
+                    icfill_state <= ICFILL_RESP;
+                end
+                ICFILL_RESP: begin
+                    // sram_rdata now valid; send to I-Cache
+                    if (icfill_cnt == 3'd7) begin
+                        icfill_state <= ICFILL_IDLE;
+                    end else begin
+                        icfill_cnt   <= icfill_cnt + 3'd1;
+                        icfill_state <= ICFILL_READ;
+                    end
+                end
+                default: icfill_state <= ICFILL_IDLE;
+            endcase
+        end
+    end
+
+    assign icfill_sram_en   = (icfill_state == ICFILL_READ);
+    assign icfill_sram_addr = icfill_base + {{(MEM_DEPTH_LOG2-3){1'b0}}, icfill_cnt};
+    assign icache_fill_valid = (icfill_state == ICFILL_RESP);
+    assign icache_fill_data  = sram_rdata;
+    assign icache_fill_done  = (icfill_state == ICFILL_RESP) && (icfill_cnt == 3'd7);
+
+    // ---------------------------------------------------------------
     // Control FSM
     // ---------------------------------------------------------------
     lm1_control u_ctrl (
@@ -377,6 +469,7 @@ module lm1_cpu
         .gc_cmd_op    (gc_cmd_op),
         .gc_cmd_arg0  (gc_cmd_arg0),
         .gc_cmd_arg1  (gc_cmd_arg1),
+        .gc_cmd_arg2  (gc_cmd_arg2),
         .gc_cmd_ready (gc_cmd_ready),
         .gc_engine_busy(gc_engine_busy),
         // Perf counter read
@@ -395,7 +488,15 @@ module lm1_cpu
         .ctr_barrier_filt_inc(ctr_barrier_filt_inc),
         .ctr_ic_hit_inc      (ctr_ic_hit_inc),
         .ctr_ic_miss_inc     (ctr_ic_miss_inc),
-        .ctr_nursery_ovf_inc (ctr_nursery_ovf_inc)
+        .ctr_nursery_ovf_inc (ctr_nursery_ovf_inc),
+        // I-Cache interface
+        .icache_fetch_req   (icache_fetch_req),
+        .icache_fetch_addr  (icache_fetch_addr),
+        .icache_fetch_valid (icache_fetch_valid),
+        .icache_fetch_inst  (icache_fetch_inst),
+        // Instruction latch
+        .inst_latch_en      (inst_latch_en),
+        .inst_latch_data    (inst_latch_data)
     );
 
     // ---------------------------------------------------------------
@@ -452,6 +553,10 @@ module lm1_cpu
     // (loading programs / debug access).
     // When the CPU is not halted or external access is not enabled,
     // the LSU has full control.
+    //
+    // Address decode: if LSU address word-index >= MEM_DEPTH (i.e.
+    // exceeds local tile SRAM), route access through the cluster
+    // crossbar instead of local SRAM.
     // ---------------------------------------------------------------
     localparam int MEM_DEPTH = 1 << MEM_DEPTH_LOG2;
 
@@ -462,7 +567,17 @@ module lm1_cpu
     logic [XLEN-1:0]   sram_wdata;
     logic [XLEN-1:0]   sram_rdata;
 
-    // Memory port mux: external has priority when ext_mem_en is high
+    // Address decode: is the LSU requesting a cluster (remote) address?
+    logic               lsu_is_cluster_addr;
+    assign lsu_is_cluster_addr = |mem_addr_lsu[XLEN-1:MEM_DEPTH_LOG2];
+
+    // Crossbar request: issue when LSU drives a cluster address
+    assign xbar_req_valid = mem_en && !ext_mem_en && lsu_is_cluster_addr;
+    assign xbar_req_we    = mem_we;
+    assign xbar_req_addr  = mem_addr_lsu;  // full word address to crossbar
+    assign xbar_req_wdata = mem_wdata_lsu;
+
+    // Memory port mux: external > I-Cache fill > LSU (local) > idle
     always_comb begin
         if (ext_mem_en) begin
             sram_en    = 1'b1;
@@ -470,16 +585,32 @@ module lm1_cpu
             sram_be    = {(XLEN/8){1'b1}};  // full-word write for external
             sram_addr  = ext_mem_addr;
             sram_wdata = ext_mem_wdata;
-        end else begin
+        end else if (icfill_sram_en) begin
+            // I-Cache line fill: read-only SRAM access
+            sram_en    = 1'b1;
+            sram_we    = 1'b0;
+            sram_be    = {(XLEN/8){1'b1}};
+            sram_addr  = icfill_sram_addr;
+            sram_wdata = '0;
+        end else if (!lsu_is_cluster_addr) begin
             sram_en    = mem_en;
             sram_we    = mem_we;
             sram_be    = mem_be;
             sram_addr  = mem_addr_lsu[MEM_DEPTH_LOG2-1:0];
             sram_wdata = mem_wdata_lsu;
+        end else begin
+            // Cluster address — SRAM is idle, crossbar handles it
+            sram_en    = 1'b0;
+            sram_we    = 1'b0;
+            sram_be    = '0;
+            sram_addr  = '0;
+            sram_wdata = '0;
         end
     end
 
-    assign mem_rdata     = sram_rdata;
+    // Read data mux: use crossbar response for cluster addresses,
+    // local SRAM for tile-local addresses
+    assign mem_rdata     = lsu_is_cluster_addr ? xbar_resp_data : sram_rdata;
     assign ext_mem_rdata = sram_rdata;
 
     lm1_sram_sp #(

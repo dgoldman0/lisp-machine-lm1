@@ -19,8 +19,11 @@ package lm1_pkg;
     // ---------------------------------------------------------------
     parameter int XLEN       = 64;   // Data word width
     parameter int ILEN       = 32;   // Instruction width
-    parameter int NREGS      = 32;   // Number of GPRs
+    parameter int NREGS      = 32;   // Number of GPRs per thread
     parameter int REG_IDX_W  = 5;    // log2(NREGS)
+    parameter int NUM_THREADS = 4;   // Hardware threads per core
+    parameter int THREAD_IDX_W = 2;  // log2(NUM_THREADS)
+    parameter int FULL_REG_W = THREAD_IDX_W + REG_IDX_W;  // 7-bit banked address
     parameter int OPCODE_W   = 6;    // Opcode field width
     parameter int FUNC_W     = 5;    // Function/sub-op field width
     parameter int IMM16_W    = 16;   // I-format immediate width
@@ -104,6 +107,14 @@ package lm1_pkg;
         OP_PUSH_MULTI    = 6'd57,
         OP_POP_MULTI     = 6'd58,
         OP_LI32          = 6'd59,
+
+        // Sub-word raw loads/stores  (supplementary scalar)
+        OP_LDB           = 6'd44,   // byte load   (zero-extended)
+        OP_STB           = 6'd45,   // byte store
+        OP_LDH           = 6'd46,   // halfword load (zero-extended)
+        OP_STH           = 6'd47,   // halfword store
+        OP_LDW           = 6'd5,    // 32-bit word load (zero-extended)
+        OP_STW           = 6'd6,    // 32-bit word store
 
         // System
         OP_TRAP          = 6'd60,

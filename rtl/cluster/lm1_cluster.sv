@@ -75,6 +75,7 @@ module lm1_cluster
     logic [3:0]                       tile_gc_cmd_op    [0:TILES_PER_CLUSTER-1];
     logic [XLEN-1:0]                 tile_gc_cmd_arg0  [0:TILES_PER_CLUSTER-1];
     logic [XLEN-1:0]                 tile_gc_cmd_arg1  [0:TILES_PER_CLUSTER-1];
+    logic [XLEN-1:0]                 tile_gc_cmd_arg2  [0:TILES_PER_CLUSTER-1];
     logic [TILES_PER_CLUSTER-1:0]     tile_gc_cmd_ready;
     logic                             gc_busy;
 
@@ -115,6 +116,7 @@ module lm1_cluster
                 .gc_cmd_op      (tile_gc_cmd_op[t]),
                 .gc_cmd_arg0    (tile_gc_cmd_arg0[t]),
                 .gc_cmd_arg1    (tile_gc_cmd_arg1[t]),
+                .gc_cmd_arg2    (tile_gc_cmd_arg2[t]),
                 .gc_cmd_ready   (tile_gc_cmd_ready[t]),
                 .gc_engine_busy (gc_busy),
                 // NoC message port — tied off for now (NoC stub)
@@ -162,22 +164,45 @@ module lm1_cluster
     );
 
     // ---------------------------------------------------------------
-    // Cluster Shared SRAM (2 MiB)
+    // Cluster Shared SRAM (2 MiB) — Dual-Port
+    //
+    // Port A: crossbar (tile access)
+    // Port B: GC movement engines (scanner/copier/fixup)
     // ---------------------------------------------------------------
     localparam int CLUSTER_MEM_DEPTH = 1 << CLUSTER_MEM_LOG2;
 
-    lm1_sram_sp #(
+    logic [XLEN-1:0]   csram_rdata_b;  // GC engine read data from port B
+    logic               gc_mem_rd_valid_r;  // 1-cycle latency for SRAM reads
+
+    lm1_sram_dp #(
         .DATA_WIDTH (XLEN),
         .DEPTH      (CLUSTER_MEM_DEPTH)
     ) u_cluster_sram (
         .clk   (clk),
-        .en    (csram_en),
-        .we    (csram_we),
-        .be    ({(XLEN/8){1'b1}}),
-        .addr  (csram_addr[CLUSTER_MEM_LOG2-1:0]),
-        .wdata (csram_wdata),
-        .rdata (csram_rdata)
+        // Port A — crossbar
+        .a_en    (csram_en),
+        .a_we    (csram_we),
+        .a_be    ({(XLEN/8){1'b1}}),
+        .a_addr  (csram_addr[CLUSTER_MEM_LOG2-1:0]),
+        .a_wdata (csram_wdata),
+        .a_rdata (csram_rdata),
+        // Port B — GC engines
+        .b_en    (gc_mem_rd_en | gc_mem_wr_en),
+        .b_we    (gc_mem_wr_en),
+        .b_be    ({(XLEN/8){1'b1}}),
+        .b_addr  (gc_mem_wr_en ? gc_mem_wr_addr[CLUSTER_MEM_LOG2-1:0]
+                               : gc_mem_rd_addr[CLUSTER_MEM_LOG2-1:0]),
+        .b_wdata (gc_mem_wr_data),
+        .b_rdata (csram_rdata_b)
     );
+
+    // Track GC read valid — 1-cycle SRAM latency
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            gc_mem_rd_valid_r <= 1'b0;
+        else
+            gc_mem_rd_valid_r <= gc_mem_rd_en && !gc_mem_wr_en;
+    end
 
     // ---------------------------------------------------------------
     // GC Command Arbiter — first valid tile wins
@@ -186,6 +211,7 @@ module lm1_cluster
     logic [3:0]         gc_cmd_op_out;
     logic [XLEN-1:0]   gc_cmd_arg0_out;
     logic [XLEN-1:0]   gc_cmd_arg1_out;
+    logic [XLEN-1:0]   gc_cmd_arg2_out;
     logic               gc_cmd_ready_in;
 
     always_comb begin
@@ -193,6 +219,7 @@ module lm1_cluster
         gc_cmd_op_out    = '0;
         gc_cmd_arg0_out  = '0;
         gc_cmd_arg1_out  = '0;
+        gc_cmd_arg2_out  = '0;
         tile_gc_cmd_ready = '0;
 
         for (int i = 0; i < TILES_PER_CLUSTER; i++) begin
@@ -201,6 +228,7 @@ module lm1_cluster
                 gc_cmd_op_out        = tile_gc_cmd_op[i];
                 gc_cmd_arg0_out      = tile_gc_cmd_arg0[i];
                 gc_cmd_arg1_out      = tile_gc_cmd_arg1[i];
+                gc_cmd_arg2_out      = tile_gc_cmd_arg2[i];
                 tile_gc_cmd_ready[i] = gc_cmd_ready_in;
             end
         end
@@ -209,16 +237,46 @@ module lm1_cluster
     // ---------------------------------------------------------------
     // GC Movement Engine Top
     //
-    // Engines access cluster SRAM via a separate port.
-    // For simplicity, the movement engines share the crossbar SRAM path
-    // during GC phases (when mutator tiles are paused).
-    // In a production design, the SRAM would be dual-ported or banked.
+    // Engines access cluster SRAM via port B of dual-port SRAM.
     // ---------------------------------------------------------------
     logic               gc_mem_rd_en;
     logic [XLEN-1:0]   gc_mem_rd_addr;
     logic               gc_mem_wr_en;
     logic [XLEN-1:0]   gc_mem_wr_addr;
     logic [XLEN-1:0]   gc_mem_wr_data;
+
+    // Scanner result wires
+    logic               scan_res_valid;
+    logic [XLEN-1:0]   scan_res_obj;
+    logic [15:0]        scan_res_field;
+    logic [XLEN-1:0]   scan_res_ref;
+    logic               scan_res_ready;
+
+    // Scanner result FIFO (128-deep) — buffered for runtime to drain
+    localparam int SCAN_FIFO_DEPTH = 128;
+    localparam int SCAN_ENTRY_W    = XLEN + 16 + XLEN;  // obj + field + ref
+
+    logic [SCAN_ENTRY_W-1:0] scan_fifo [0:SCAN_FIFO_DEPTH-1];
+    logic [6:0] scan_fifo_wr, scan_fifo_rd;
+    logic [7:0] scan_fifo_count;
+
+    assign scan_res_ready = (scan_fifo_count < SCAN_FIFO_DEPTH[7:0]);
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            scan_fifo_wr    <= '0;
+            scan_fifo_rd    <= '0;
+            scan_fifo_count <= '0;
+        end else begin
+            if (scan_res_valid && scan_res_ready) begin
+                scan_fifo[scan_fifo_wr] <= {scan_res_obj, scan_res_field, scan_res_ref};
+                scan_fifo_wr <= scan_fifo_wr + 7'd1;
+                if (scan_fifo_count < SCAN_FIFO_DEPTH[7:0])
+                    scan_fifo_count <= scan_fifo_count + 8'd1;
+            end
+            // Runtime drains scan FIFO via a separate interface (not yet exposed)
+        end
+    end
 
     lm1_gc_engine_top u_gc_engines (
         .clk            (clk),
@@ -228,25 +286,24 @@ module lm1_cluster
         .cmd_op         (gc_cmd_op_out),
         .cmd_arg0       (gc_cmd_arg0_out),
         .cmd_arg1       (gc_cmd_arg1_out),
+        .cmd_arg2       (gc_cmd_arg2_out),
         .cmd_ready      (gc_cmd_ready_in),
         .busy           (gc_busy),
-        // Memory — engines read/write cluster SRAM via crossbar
-        // (simplified: read uses sram_rdata directly, write is
-        //  multiplexed with crossbar writes)
+        // Memory — port B of dual-port cluster SRAM
         .mem_rd_en      (gc_mem_rd_en),
         .mem_rd_addr    (gc_mem_rd_addr),
-        .mem_rd_data    (csram_rdata),
-        .mem_rd_valid   (gc_mem_rd_en),      // single-cycle SRAM: valid = en
+        .mem_rd_data    (csram_rdata_b),
+        .mem_rd_valid   (gc_mem_rd_valid_r),
         .mem_wr_en      (gc_mem_wr_en),
         .mem_wr_addr    (gc_mem_wr_addr),
         .mem_wr_data    (gc_mem_wr_data),
-        .mem_wr_ready   (1'b1),
-        // Scanner results — connected to nothing for now (runtime reads queue)
-        .scan_res_valid (),
-        .scan_res_obj   (),
-        .scan_res_field (),
-        .scan_res_ref   (),
-        .scan_res_ready (1'b1),
+        .mem_wr_ready   (1'b1),             // SRAM writes always succeed
+        // Scanner results
+        .scan_res_valid (scan_res_valid),
+        .scan_res_obj   (scan_res_obj),
+        .scan_res_field (scan_res_field),
+        .scan_res_ref   (scan_res_ref),
+        .scan_res_ready (scan_res_ready),
         .copy_dst_ptr   ()
     );
 

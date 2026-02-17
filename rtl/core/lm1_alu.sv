@@ -102,6 +102,27 @@ module lm1_alu
                             div_count   <= 7'd63;
                             div_state   <= DIV_RUNNING;
                         end
+                    end else if (start && (alu_op == OP_ARITH_FIX) &&
+                                 (alu_func == FUNC_DIV_FIX)) begin
+                        // Tagged fixnum divide: untag both operands,
+                        // divide, then retag result in the output mux.
+                        // Untag: arithmetic right shift by 1
+                        logic [XLEN-1:0] fix_div_a, fix_div_b;
+                        fix_div_a = $unsigned($signed(operand_a) >>> 1);
+                        fix_div_b = $unsigned($signed(operand_b) >>> 1);
+                        if (fix_div_b == '0) begin
+                            div_by_zero <= 1'b1;
+                            div_state   <= DIV_DONE;
+                        end else begin
+                            div_by_zero  <= 1'b0;
+                            div_q        <= '0;
+                            div_r        <= '0;
+                            div_d        <= fix_div_b;
+                            div_dividend <= fix_div_a;
+                            div_divisor  <= fix_div_b;
+                            div_count    <= 7'd63;
+                            div_state    <= DIV_RUNNING;
+                        end
                     end
                 end
 
@@ -279,13 +300,19 @@ module lm1_alu
                             result_valid = 1'b1;
                         end
                         FUNC_DIV_FIX: begin
-                            // Handled by multi-cycle divider path
-                            // Control FSM manages untag → divide → retag
-                            if (operand_b == '0) begin
-                                trap_raise   = 1'b1;
-                                trap_code    = TRAP_DIVIDE_BY_ZERO;
-                                result_valid = 1'b1;
+                            // Multi-cycle: divider operates on untagged values.
+                            // When done, retag quotient as fixnum (<<1).
+                            if (div_state == DIV_DONE) begin
+                                if (div_by_zero) begin
+                                    trap_raise   = 1'b1;
+                                    trap_code    = TRAP_DIVIDE_BY_ZERO;
+                                    result_valid = 1'b1;
+                                end else begin
+                                    result       = tag_fixnum(div_quotient);
+                                    result_valid = 1'b1;
+                                end
                             end
+                            // else: not done yet → result_valid stays 0, FSM waits
                         end
                         default: begin
                             result_valid = 1'b1;

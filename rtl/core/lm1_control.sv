@@ -23,10 +23,10 @@ module lm1_control
     input  logic [XLEN-1:0]    rf_rd1_data,   // read port 1 data
     input  logic [XLEN-1:0]    rf_rd2_data,   // read port 2 data
     output logic                rf_we,
-    output logic [REG_IDX_W-1:0] rf_w_addr,
+    output logic [FULL_REG_W-1:0] rf_w_addr,
     output logic [XLEN-1:0]    rf_w_data,
-    output logic [REG_IDX_W-1:0] rf_rd1_addr,  // read port 1 address
-    output logic [REG_IDX_W-1:0] rf_rd2_addr,  // read port 2 address
+    output logic [FULL_REG_W-1:0] rf_rd1_addr,  // read port 1 address
+    output logic [FULL_REG_W-1:0] rf_rd2_addr,  // read port 2 address
 
     // -- ALU interface --
     output opcode_t             alu_op,
@@ -92,6 +92,7 @@ module lm1_control
     output logic [3:0]         gc_cmd_op,
     output logic [XLEN-1:0]    gc_cmd_arg0,      // region base / pointer list base
     output logic [XLEN-1:0]    gc_cmd_arg1,      // region size / dest base
+    output logic [XLEN-1:0]    gc_cmd_arg2,      // copy: region size (from rd)
     input  logic                gc_cmd_ready,     // engine accepts command
     input  logic                gc_engine_busy,   // any engine currently active
 
@@ -115,7 +116,17 @@ module lm1_control
     output logic                ctr_barrier_filt_inc,
     output logic                ctr_ic_hit_inc,
     output logic                ctr_ic_miss_inc,
-    output logic                ctr_nursery_ovf_inc
+    output logic                ctr_nursery_ovf_inc,
+
+    // -- I-Cache fetch interface --
+    output logic                icache_fetch_req,
+    output logic [XLEN-1:0]    icache_fetch_addr,
+    input  logic                icache_fetch_valid,
+    input  logic [ILEN-1:0]    icache_fetch_inst,
+
+    // -- Instruction latch control (for CPU inst_latched) --
+    output logic                inst_latch_en,
+    output logic [ILEN-1:0]    inst_latch_data
 );
 
     // ---------------------------------------------------------------
@@ -125,7 +136,13 @@ module lm1_control
                            LSU_IFETCH  = 4'd1,
                            LSU_LOAD64  = 4'd2,
                            LSU_STORE64 = 4'd3,
-                           LSU_LOAD32  = 4'd4;
+                           LSU_LOAD32  = 4'd4,
+                           LSU_LOAD_BYTE  = 4'd5,
+                           LSU_STORE_BYTE = 4'd6,
+                           LSU_LOAD_HALF  = 4'd7,
+                           LSU_STORE_HALF = 4'd8,
+                           LSU_LOAD_WORD  = 4'd9,
+                           LSU_STORE_WORD = 4'd10;
 
     // ---------------------------------------------------------------
     // FSM states
@@ -174,6 +191,7 @@ module lm1_control
         S_BARRIER_MARK_W,
         S_SEND_WAIT,
         S_RECV_WAIT,
+        S_TRY_RECV_WB,
         S_ENQ_WAIT,
         S_FENCE_GC,
         S_TRAP_LOOKUP,
@@ -187,6 +205,19 @@ module lm1_control
     state_t          state;
     logic [XLEN-1:0] pc;
     logic [XLEN-1:0] cyc;
+
+    // --- FGMT: 4 hardware threads ---
+    logic [THREAD_IDX_W-1:0] cur_thread;     // currently active thread (0..3)
+    logic [XLEN-1:0] thread_pc    [0:NUM_THREADS-1];  // per-thread PC
+    logic [NUM_THREADS-1:0] thread_active;   // which threads are active (not halted)
+
+    // Helper: build banked register address from thread + reg index
+    function automatic logic [FULL_REG_W-1:0] banked_addr(
+        logic [THREAD_IDX_W-1:0] tid,
+        logic [REG_IDX_W-1:0]    ridx
+    );
+        return {tid, ridx};
+    endfunction
 
     decoded_t        dr;                 // latched instruction
     logic [XLEN-1:0] imm_r;             // latched sign-extended immediate
@@ -251,7 +282,7 @@ module lm1_control
     // ---------------------------------------------------------------
     // Outputs
     // ---------------------------------------------------------------
-    assign halted      = (state == S_HALTED);
+    assign halted      = (state == S_HALTED) && (thread_active == '0);
     assign pc_out      = pc;
     assign cycle_count = cyc;
 
@@ -263,6 +294,11 @@ module lm1_control
             state      <= S_RESET;
             pc         <= '0;
             cyc        <= '0;
+            cur_thread <= '0;
+            for (int t = 0; t < NUM_THREADS; t++) begin
+                thread_pc[t] <= '0;
+            end
+            thread_active <= {{(NUM_THREADS-1){1'b0}}, 1'b1};  // only thread 0 active at reset
             dr         <= '0;
             imm_r      <= '0;
             opa        <= '0;
@@ -293,6 +329,59 @@ module lm1_control
             state      <= ns;
             pc         <= pc_n;
             cyc        <= cyc_inc ? (cyc + 64'd1) : cyc;
+
+            // FGMT: save/restore thread context at instruction boundaries
+            // When entering S_FETCH from a completed instruction, save
+            // current thread PC and switch to next active thread.
+            if (ns == S_FETCH && state != S_FETCH && state != S_FETCH_WAIT &&
+                state != S_RESET) begin
+                // Save current thread's PC
+                thread_pc[cur_thread] <= pc_n;
+                // Round-robin to next active thread
+                begin
+                    logic [THREAD_IDX_W-1:0] next_t;
+                    next_t = cur_thread;
+                    for (int i = 1; i <= NUM_THREADS; i++) begin
+                        logic [THREAD_IDX_W-1:0] candidate;
+                        candidate = (cur_thread + THREAD_IDX_W'(i)) & (NUM_THREADS-1);
+                        if (thread_active[candidate]) begin
+                            next_t = candidate;
+                            break;
+                        end
+                    end
+                    cur_thread <= next_t;
+                    pc         <= thread_pc[next_t];
+                end
+            end else if (state == S_RESET) begin
+                // At reset exit, load thread 0's PC
+                pc <= thread_pc[0];
+            end
+
+            // Track thread halted state
+            if (ns == S_HALTED && state != S_HALTED) begin
+                thread_active[cur_thread] <= 1'b0;
+                // If other threads are still active, switch to one
+                // instead of actually entering S_HALTED.
+                begin
+                    logic found_active;
+                    logic [THREAD_IDX_W-1:0] next_t;
+                    found_active = 1'b0;
+                    next_t = cur_thread;
+                    for (int i = 1; i < NUM_THREADS; i++) begin
+                        logic [THREAD_IDX_W-1:0] candidate;
+                        candidate = (cur_thread + THREAD_IDX_W'(i)) & (NUM_THREADS-1);
+                        if (thread_active[candidate] && !found_active) begin
+                            next_t = candidate;
+                            found_active = 1'b1;
+                        end
+                    end
+                    if (found_active) begin
+                        state <= S_FETCH;  // override ns = S_HALTED
+                        cur_thread <= next_t;
+                        pc <= thread_pc[next_t];
+                    end
+                end
+            end
             dr         <= dr_n;
             imm_r      <= imm_n;
             opa        <= opa_n;
@@ -363,10 +452,10 @@ module lm1_control
 
         // === Default outputs ===
         rf_we       = 1'b0;
-        rf_w_addr   = dr.rd;
+        rf_w_addr   = banked_addr(cur_thread, dr.rd);
         rf_w_data   = '0;
-        rf_rd1_addr = dec_in.rd;
-        rf_rd2_addr = dec_in.rs1;
+        rf_rd1_addr = banked_addr(cur_thread, dec_in.rd);
+        rf_rd2_addr = banked_addr(cur_thread, dec_in.rs1);
 
         alu_op      = dr.opcode;
         alu_func    = dr.func;
@@ -411,6 +500,7 @@ module lm1_control
         gc_cmd_op    = '0;
         gc_cmd_arg0  = '0;
         gc_cmd_arg1  = '0;
+        gc_cmd_arg2  = '0;
 
         // Perf counter defaults
         ctr_id               = '0;
@@ -422,23 +512,42 @@ module lm1_control
         ctr_ic_miss_inc      = 1'b0;
         ctr_nursery_ovf_inc  = 1'b0;
 
+        // I-Cache fetch defaults
+        icache_fetch_req  = 1'b0;
+        icache_fetch_addr = '0;
+        inst_latch_en     = 1'b0;
+        inst_latch_data   = '0;
+
         // =========================================================
         case (state)
 
         S_RESET: ns = S_FETCH;
 
         // ---------------------------------------------------------
-        // FETCH
+        // FETCH — check I-Cache first; LSU fallback only if needed.
         // ---------------------------------------------------------
         S_FETCH: begin
-            lsu_req  = 1'b1;
-            lsu_op   = LSU_IFETCH;
-            lsu_addr = pc;
-            if (lsu_ready) ns = S_FETCH_WAIT;
+            icache_fetch_req  = 1'b1;
+            icache_fetch_addr = pc;
+            if (icache_fetch_valid) begin
+                // I-Cache hit (or fill just completed)
+                inst_latch_en   = 1'b1;
+                inst_latch_data = icache_fetch_inst;
+                ctr_ic_hit_inc  = 1'b1;
+                ns = S_DECODE;
+            end
+            // On miss the I-Cache fill sequencer (in lm1_cpu) handles the
+            // burst read from SRAM.  We simply stay in S_FETCH until the
+            // fill finishes and icache_fetch_valid asserts.
         end
 
         S_FETCH_WAIT: begin
-            if (lsu_valid) ns = S_DECODE;
+            // Legacy LSU-based fetch path (kept for fallback / future use)
+            if (lsu_valid) begin
+                inst_latch_en   = 1'b1;
+                inst_latch_data = lsu_inst;
+                ns = S_DECODE;
+            end
         end
 
         // ---------------------------------------------------------
@@ -459,9 +568,9 @@ module lm1_control
         S_DECODE: begin
             dr_n     = dec_in;
             imm_n    = imm_sext_in;
-            // Read rd on port1, rs1 on port2
-            rf_rd1_addr = dec_in.rd;
-            rf_rd2_addr = dec_in.rs1;
+            // Read rd on port1, rs1 on port2 (banked by thread)
+            rf_rd1_addr = banked_addr(cur_thread, dec_in.rd);
+            rf_rd2_addr = banked_addr(cur_thread, dec_in.rs1);
             opa_n    = rf_rd1_data;  // regs[rd]
             opb_n    = rf_rd2_data;  // regs[rs1]
             ns       = S_EXECUTE;
@@ -475,8 +584,8 @@ module lm1_control
         // We need regs[rs2] on port 1 this cycle.
         // ---------------------------------------------------------
         S_EXECUTE: begin
-            // Read rs2 on port 1
-            rf_rd1_addr = dr.rs2;
+            // Read rs2 on port 1 (banked by thread)
+            rf_rd1_addr = banked_addr(cur_thread, dr.rs2);
             opc_n       = rf_rd1_data;   // regs[rs2] available
             // Use rf_rd1_data as rs2 value immediate this cycle
             // (wire directly — no latency issue since regfile reads are combinational)
@@ -556,7 +665,7 @@ module lm1_control
                     ns      = S_HDR_READ;
                 end else begin
                     rf_we     = 1'b1;
-                    rf_w_addr = dr.rd;
+                    rf_w_addr = banked_addr(cur_thread, dr.rd);
                     rf_w_data = VAL_NIL;
                     ns        = S_FETCH;
                 end
@@ -565,14 +674,14 @@ module lm1_control
             // ===== Load immediate =====
             OP_LI: begin
                 rf_we     = 1'b1;
-                rf_w_addr = dr.rd;
+                rf_w_addr = banked_addr(cur_thread, dr.rd);
                 rf_w_data = imm_r;
                 ns        = S_FETCH;
             end
 
             OP_LUI: begin
                 rf_we     = 1'b1;
-                rf_w_addr = dr.rd;
+                rf_w_addr = banked_addr(cur_thread, dr.rd);
                 rf_w_data = {32'b0, dr.imm16, 16'b0};
                 ns        = S_FETCH;
             end
@@ -598,6 +707,49 @@ module lm1_control
             OP_STR: begin
                 ta_n    = (opa + imm_r) & ~64'h7;
                 td_n    = opb;   // rs1 value to store
+                cyc_inc = 1'b0;
+                pc_n    = pc;
+                ns      = S_MEM;
+            end
+
+            // ===== Sub-word loads =====
+            OP_LDB: begin
+                ta_n    = opb + imm_r;   // byte address, no alignment
+                cyc_inc = 1'b0;
+                pc_n    = pc;
+                ns      = S_MEM;
+            end
+            OP_LDH: begin
+                ta_n    = (opb + imm_r) & ~64'h1;  // halfword aligned
+                cyc_inc = 1'b0;
+                pc_n    = pc;
+                ns      = S_MEM;
+            end
+            OP_LDW: begin
+                ta_n    = (opb + imm_r) & ~64'h3;  // word aligned
+                cyc_inc = 1'b0;
+                pc_n    = pc;
+                ns      = S_MEM;
+            end
+
+            // ===== Sub-word stores =====
+            OP_STB: begin
+                ta_n    = opa + imm_r;   // byte address
+                td_n    = opb;
+                cyc_inc = 1'b0;
+                pc_n    = pc;
+                ns      = S_MEM;
+            end
+            OP_STH: begin
+                ta_n    = (opa + imm_r) & ~64'h1;
+                td_n    = opb;
+                cyc_inc = 1'b0;
+                pc_n    = pc;
+                ns      = S_MEM;
+            end
+            OP_STW: begin
+                ta_n    = (opa + imm_r) & ~64'h3;
+                td_n    = opb;
                 cyc_inc = 1'b0;
                 pc_n    = pc;
                 ns      = S_MEM;
@@ -711,7 +863,7 @@ module lm1_control
 
             // ===== Stack PUSH/POP =====
             OP_PUSH_POP: begin
-                rf_rd1_addr = REG_SP;
+                rf_rd1_addr = banked_addr(cur_thread, REG_SP);
                 begin
                     logic [XLEN-1:0] sp_v;
                     sp_v = rf_rd1_data;
@@ -719,7 +871,7 @@ module lm1_control
                         ta_n      = sp_v - 64'd8;
                         td_n      = opa;         // value to push
                         rf_we     = 1'b1;
-                        rf_w_addr = REG_SP;
+                        rf_w_addr = banked_addr(cur_thread, REG_SP);
                         rf_w_data = sp_v - 64'd8;
                         cyc_inc   = 1'b0;
                         pc_n      = pc;
@@ -842,8 +994,8 @@ module lm1_control
 
             // ===== Allocation =====
             OP_ALLOC: begin
-                rf_rd1_addr = REG_NP;
-                rf_rd2_addr = REG_NL;
+                rf_rd1_addr = banked_addr(cur_thread, REG_NP);
+                rf_rd2_addr = banked_addr(cur_thread, REG_NL);
                 begin
                     logic [XLEN-1:0] np_v, nl_v, new_np;
                     logic [15:0] nw;
@@ -863,7 +1015,7 @@ module lm1_control
                         aa_n      = np_v;
                         acnt_n    = nw[4:0];
                         rf_we     = 1'b1;
-                        rf_w_addr = REG_NP;
+                        rf_w_addr = banked_addr(cur_thread, REG_NP);
                         rf_w_data = new_np;
                         cyc_inc   = 1'b0;
                         pc_n      = pc;
@@ -873,8 +1025,8 @@ module lm1_control
             end
 
             OP_ALLOC_CONS: begin
-                rf_rd1_addr = REG_NP;
-                rf_rd2_addr = REG_NL;
+                rf_rd1_addr = banked_addr(cur_thread, REG_NP);
+                rf_rd2_addr = banked_addr(cur_thread, REG_NL);
                 begin
                     logic [XLEN-1:0] np_v, nl_v, new_np;
                     np_v   = rf_rd1_data;
@@ -892,7 +1044,7 @@ module lm1_control
                         aa_n      = np_v;
                         acnt_n    = 5'd2;
                         rf_we     = 1'b1;
-                        rf_w_addr = REG_NP;
+                        rf_w_addr = banked_addr(cur_thread, REG_NP);
                         rf_w_data = new_np;
                         cyc_inc   = 1'b0;
                         pc_n      = pc;
@@ -902,8 +1054,8 @@ module lm1_control
             end
 
             OP_ALLOCV: begin
-                rf_rd1_addr = REG_NP;
-                rf_rd2_addr = REG_NL;
+                rf_rd1_addr = banked_addr(cur_thread, REG_NP);
+                rf_rd2_addr = banked_addr(cur_thread, REG_NL);
                 begin
                     logic [XLEN-1:0] np_v, nl_v, new_np;
                     logic signed [XLEN-1:0] len_s;
@@ -925,7 +1077,7 @@ module lm1_control
                         aa_n      = np_v;
                         acnt_n    = nw[4:0];
                         rf_we     = 1'b1;
-                        rf_w_addr = REG_NP;
+                        rf_w_addr = banked_addr(cur_thread, REG_NP);
                         rf_w_data = new_np;
                         cyc_inc   = 1'b0;
                         pc_n      = pc;
@@ -935,8 +1087,8 @@ module lm1_control
             end
 
             OP_ALLOC_CLOSURE: begin
-                rf_rd1_addr = REG_NP;
-                rf_rd2_addr = REG_NL;
+                rf_rd1_addr = banked_addr(cur_thread, REG_NP);
+                rf_rd2_addr = banked_addr(cur_thread, REG_NL);
                 begin
                     logic [XLEN-1:0] np_v, nl_v, new_np;
                     logic [15:0] nw;
@@ -956,7 +1108,7 @@ module lm1_control
                         aa_n      = np_v;
                         acnt_n    = nw[4:0];
                         rf_we     = 1'b1;
-                        rf_w_addr = REG_NP;
+                        rf_w_addr = banked_addr(cur_thread, REG_NP);
                         rf_w_data = new_np;
                         cyc_inc   = 1'b0;
                         pc_n      = pc;
@@ -972,30 +1124,30 @@ module lm1_control
                     // System traps
                     case (dr.raw26[7:0])
                         8'h90: begin  // SET_TRAP_TABLE
-                            rf_rd1_addr  = 5'd1;
+                            rf_rd1_addr = banked_addr(cur_thread, 5'd1);
                             trap_tbl_n   = rf_rd1_data;
                         end
                         8'h91: begin  // SET_TEMPLATE
-                            rf_rd1_addr  = 5'd1;
-                            rf_rd2_addr  = 5'd2;
+                            rf_rd1_addr = banked_addr(cur_thread, 5'd1);
+                            rf_rd2_addr = banked_addr(cur_thread, 5'd2);
                             tmpl_wr_en   = 1'b1;
                             tmpl_wr_idx  = rf_rd1_data[7:0];
                             tmpl_wr_data = rf_rd2_data;
                         end
                         8'h92: begin  // SET_CARD_BASE
-                            rf_rd1_addr       = 5'd1;
+                            rf_rd1_addr = banked_addr(cur_thread, 5'd1);
                             card_table_base_n = rf_rd1_data;
                         end
                         8'h93: begin  // SET_CARD_SHIFT
-                            rf_rd1_addr  = 5'd1;
+                            rf_rd1_addr = banked_addr(cur_thread, 5'd1);
                             card_shift_n = rf_rd1_data[5:0];
                         end
                         8'h94: begin  // SET_GEN_BOUNDARY
-                            rf_rd1_addr    = 5'd1;
+                            rf_rd1_addr = banked_addr(cur_thread, 5'd1);
                             gen_boundary_n = rf_rd1_data;
                         end
                         8'h95: begin  // SET_QUEUE_BASE
-                            rf_rd1_addr  = 5'd1;
+                            rf_rd1_addr = banked_addr(cur_thread, 5'd1);
                             queue_base_n = rf_rd1_data;
                         end
                         default: ;
@@ -1024,7 +1176,7 @@ module lm1_control
             // ===== SYS_INFO =====
             OP_SYS_INFO: begin
                 rf_we     = 1'b1;
-                rf_w_addr = dr.rd;
+                rf_w_addr = banked_addr(cur_thread, dr.rd);
                 case (dr.rs1)
                     SYS_TILE_ID:      rf_w_data = cfg_tile_id;
                     SYS_THREAD_ID:    rf_w_data = cfg_thread_id;
@@ -1070,7 +1222,7 @@ module lm1_control
                 gc_cmd_op    = GC_CMD_SCAN;
                 gc_cmd_arg0  = opb;             // region base
                 gc_cmd_arg1  = rf_rd1_data;     // region size (rs2 on port1)
-                rf_rd1_addr  = dr.rs2;
+                rf_rd1_addr  = banked_addr(cur_thread, dr.rs2);
                 if (gc_cmd_ready) begin
                     ns = S_FETCH;
                 end else begin
@@ -1085,7 +1237,8 @@ module lm1_control
                 gc_cmd_op    = GC_CMD_COPY;
                 gc_cmd_arg0  = opb;
                 gc_cmd_arg1  = rf_rd1_data;
-                rf_rd1_addr  = dr.rs2;
+                gc_cmd_arg2  = opa;             // rd = region size
+                rf_rd1_addr  = banked_addr(cur_thread, dr.rs2);
                 if (gc_cmd_ready) begin
                     ns = S_FETCH;
                 end else begin
@@ -1100,7 +1253,7 @@ module lm1_control
                 gc_cmd_op    = GC_CMD_FIXUP;
                 gc_cmd_arg0  = opb;
                 gc_cmd_arg1  = rf_rd1_data;
-                rf_rd1_addr  = dr.rs2;
+                rf_rd1_addr  = banked_addr(cur_thread, dr.rs2);
                 if (gc_cmd_ready) begin
                     ns = S_FETCH;
                 end else begin
@@ -1115,7 +1268,7 @@ module lm1_control
                 gc_cmd_op    = GC_CMD_COMPACT;
                 gc_cmd_arg0  = opb;
                 gc_cmd_arg1  = rf_rd1_data;
-                rf_rd1_addr  = dr.rs2;
+                rf_rd1_addr  = banked_addr(cur_thread, dr.rs2);
                 if (gc_cmd_ready) begin
                     ns = S_FETCH;
                 end else begin
@@ -1180,17 +1333,38 @@ module lm1_control
 
             OP_RECV: begin
                 mq_rd_id  = dr.imm16[1:0];
-                if (mq_rd_valid) begin
-                    mq_rd_en  = 1'b1;
-                    rf_we     = 1'b1;
-                    rf_w_addr = dr.rd;
-                    rf_w_data = mq_rd_data;
-                    ns = S_FETCH;
+                if (dr.func != '0) begin
+                    // --- TRY.RECV Rd, Rd2, Rs_queue ---
+                    // Non-blocking: func[4:0] = Rd2 register index
+                    if (mq_rd_valid) begin
+                        mq_rd_en  = 1'b1;
+                        rf_we     = 1'b1;
+                        rf_w_addr = banked_addr(cur_thread, dr.rd);
+                        rf_w_data = mq_rd_data;
+                        opa_n     = VAL_T;     // remember: success
+                        ns = S_TRY_RECV_WB;
+                    end else begin
+                        // Empty — Rd = nil
+                        rf_we     = 1'b1;
+                        rf_w_addr = banked_addr(cur_thread, dr.rd);
+                        rf_w_data = VAL_NIL;
+                        opa_n     = VAL_NIL;   // remember: empty
+                        ns = S_TRY_RECV_WB;
+                    end
                 end else begin
-                    tc_n    = TRAP_QUEUE_EMPTY;
-                    cyc_inc = 1'b0;
-                    pc_n    = pc;
-                    ns      = S_TRAP_LOOKUP;
+                    // --- RECV (blocking) ---
+                    if (mq_rd_valid) begin
+                        mq_rd_en  = 1'b1;
+                        rf_we     = 1'b1;
+                        rf_w_addr = banked_addr(cur_thread, dr.rd);
+                        rf_w_data = mq_rd_data;
+                        ns = S_FETCH;
+                    end else begin
+                        tc_n    = TRAP_QUEUE_EMPTY;
+                        cyc_inc = 1'b0;
+                        pc_n    = pc;
+                        ns      = S_TRAP_LOOKUP;
+                    end
                 end
             end
 
@@ -1222,7 +1396,7 @@ module lm1_control
                     ns   = S_TRAP_LOOKUP;
                 end else begin
                     rf_we     = 1'b1;
-                    rf_w_addr = dr.rd;
+                    rf_w_addr = banked_addr(cur_thread, dr.rd);
                     rf_w_data = alu_result;
                     ns        = S_FETCH;
                 end
@@ -1258,6 +1432,35 @@ module lm1_control
                     lsu_op   = LSU_LOAD64;
                     lsu_addr = ta;
                 end
+                // Sub-word loads
+                OP_LDB: begin
+                    lsu_op   = LSU_LOAD_BYTE;
+                    lsu_addr = ta;
+                end
+                OP_LDH: begin
+                    lsu_op   = LSU_LOAD_HALF;
+                    lsu_addr = ta;
+                end
+                OP_LDW: begin
+                    lsu_op   = LSU_LOAD_WORD;
+                    lsu_addr = ta;
+                end
+                // Sub-word stores
+                OP_STB: begin
+                    lsu_op    = LSU_STORE_BYTE;
+                    lsu_addr  = ta;
+                    lsu_wdata = td;
+                end
+                OP_STH: begin
+                    lsu_op    = LSU_STORE_HALF;
+                    lsu_addr  = ta;
+                    lsu_wdata = td;
+                end
+                OP_STW: begin
+                    lsu_op    = LSU_STORE_WORD;
+                    lsu_addr  = ta;
+                    lsu_wdata = td;
+                end
                 default: begin
                     lsu_op   = LSU_LOAD64;
                     lsu_addr = ta;
@@ -1277,12 +1480,25 @@ module lm1_control
                 case (dr.opcode)
                 OP_LDR: begin
                     rf_we     = 1'b1;
-                    rf_w_addr = dr.rd;
+                    rf_w_addr = banked_addr(cur_thread, dr.rd);
                     rf_w_data = lsu_rdata;
                     ns        = S_FETCH;
                 end
 
                 OP_STR: begin
+                    ns = S_FETCH;
+                end
+
+                // Sub-word loads: LSU already extracted and zero-extended
+                OP_LDB, OP_LDH, OP_LDW: begin
+                    rf_we     = 1'b1;
+                    rf_w_addr = banked_addr(cur_thread, dr.rd);
+                    rf_w_data = lsu_rdata;
+                    ns        = S_FETCH;
+                end
+
+                // Sub-word stores: done
+                OP_STB, OP_STH, OP_STW: begin
                     ns = S_FETCH;
                 end
 
@@ -1292,7 +1508,7 @@ module lm1_control
                     end else begin
                         // POP: write loaded value to rd
                         rf_we     = 1'b1;
-                        rf_w_addr = dr.rd;
+                        rf_w_addr = banked_addr(cur_thread, dr.rd);
                         rf_w_data = lsu_rdata;
                         // SP += 8
                         ta_n = ta + 64'd8;
@@ -1303,7 +1519,7 @@ module lm1_control
                 OP_FAA_FENCE: begin
                     // old = mem[addr], store old + delta, return old
                     rf_we     = 1'b1;
-                    rf_w_addr = dr.rd;
+                    rf_w_addr = banked_addr(cur_thread, dr.rd);
                     rf_w_data = lsu_rdata;
                     // Issue store of new value
                     lsu_req   = 1'b1;
@@ -1316,17 +1532,17 @@ module lm1_control
                 OP_CAS_TAGGED: begin
                     if (lsu_rdata == opc) begin
                         // Match → store new value from func register
-                        rf_rd1_addr = dr.func;
+                        rf_rd1_addr = banked_addr(cur_thread, dr.func);
                         lsu_req     = 1'b1;
                         lsu_op      = LSU_STORE64;
                         lsu_addr    = ta;
                         lsu_wdata   = rf_rd1_data;
                         rf_we       = 1'b1;
-                        rf_w_addr   = dr.rd;
+                        rf_w_addr   = banked_addr(cur_thread, dr.rd);
                         rf_w_data   = VAL_T;
                     end else begin
                         rf_we       = 1'b1;
-                        rf_w_addr   = dr.rd;
+                        rf_w_addr   = banked_addr(cur_thread, dr.rd);
                         rf_w_data   = VAL_NIL;
                     end
                     ns = S_FETCH;
@@ -1367,13 +1583,13 @@ module lm1_control
                 case (dr.opcode)
                 OP_LD, OP_LD_CAR_CDR: begin
                     rf_we     = 1'b1;
-                    rf_w_addr = dr.rd;
+                    rf_w_addr = banked_addr(cur_thread, dr.rd);
                     rf_w_data = lsu_rdata;
                     ns = S_FETCH;
                 end
                 OP_LI32: begin
                     rf_we     = 1'b1;
-                    rf_w_addr = dr.rd;
+                    rf_w_addr = banked_addr(cur_thread, dr.rd);
                     rf_w_data = lsu_rdata;
                     pc_n      = pc + 64'd8;
                     ns = S_FETCH;
@@ -1458,14 +1674,14 @@ module lm1_control
         //   State 2: LR=ret_addr(td), FP=SP
         // ---------------------------------------------------------
         S_PUSH_FRAME_0: begin
-            rf_rd1_addr = REG_SP;
-            rf_rd2_addr = REG_LR;
+            rf_rd1_addr = banked_addr(cur_thread, REG_SP);
+            rf_rd2_addr = banked_addr(cur_thread, REG_LR);
             begin
                 logic [XLEN-1:0] sp_v;
                 sp_v = rf_rd1_data;
                 ta_n  = sp_v - 64'd8;
                 rf_we     = 1'b1;
-                rf_w_addr = REG_SP;
+                rf_w_addr = banked_addr(cur_thread, REG_SP);
                 rf_w_data = sp_v - 64'd8;
                 lsu_req   = 1'b1;
                 lsu_op    = LSU_STORE64;
@@ -1480,14 +1696,14 @@ module lm1_control
         end
 
         S_PUSH_FRAME_1: begin
-            rf_rd1_addr = REG_SP;
-            rf_rd2_addr = REG_FP;
+            rf_rd1_addr = banked_addr(cur_thread, REG_SP);
+            rf_rd2_addr = banked_addr(cur_thread, REG_FP);
             begin
                 logic [XLEN-1:0] sp_v;
                 sp_v = rf_rd1_data;
                 ta_n  = sp_v - 64'd8;
                 rf_we     = 1'b1;
-                rf_w_addr = REG_SP;
+                rf_w_addr = banked_addr(cur_thread, REG_SP);
                 rf_w_data = sp_v - 64'd8;
                 lsu_req   = 1'b1;
                 lsu_op    = LSU_STORE64;
@@ -1503,9 +1719,9 @@ module lm1_control
 
         S_PUSH_FRAME_2: begin
             // LR = return address (td), FP = current SP
-            rf_rd1_addr = REG_SP;
+            rf_rd1_addr = banked_addr(cur_thread, REG_SP);
             rf_we       = 1'b1;
-            rf_w_addr   = REG_LR;
+            rf_w_addr   = banked_addr(cur_thread, REG_LR);
             rf_w_data   = td;
             ta_n        = rf_rd1_data;  // save SP for FP write next cycle
             // Need one more cycle to write FP
@@ -1521,13 +1737,13 @@ module lm1_control
         //   State 2: write FP=ta (reused from push_frame too), jump to tt
         // ---------------------------------------------------------
         S_POP_FRAME_0: begin
-            rf_rd1_addr = REG_LR;
-            rf_rd2_addr = REG_FP;
+            rf_rd1_addr = banked_addr(cur_thread, REG_LR);
+            rf_rd2_addr = banked_addr(cur_thread, REG_FP);
             tt_n        = rf_rd1_data;    // save LR as return address
             ta_n        = rf_rd2_data;    // FP value = restore point
             // SP = FP
             rf_we       = 1'b1;
-            rf_w_addr   = REG_SP;
+            rf_w_addr   = banked_addr(cur_thread, REG_SP);
             rf_w_data   = rf_rd2_data;
             // Load saved FP from mem[FP]
             lsu_req     = 1'b1;
@@ -1540,7 +1756,7 @@ module lm1_control
             if (lsu_valid) begin
                 // Restore FP
                 rf_we     = 1'b1;
-                rf_w_addr = REG_FP;
+                rf_w_addr = banked_addr(cur_thread, REG_FP);
                 rf_w_data = lsu_rdata;
                 // Load saved LR from mem[FP+8]
                 lsu_req   = 1'b1;
@@ -1554,7 +1770,7 @@ module lm1_control
             if (lsu_valid) begin
                 // Restore LR
                 rf_we     = 1'b1;
-                rf_w_addr = REG_LR;
+                rf_w_addr = banked_addr(cur_thread, REG_LR);
                 rf_w_data = lsu_rdata;
                 // SP = FP + 16  (two saved words)
                 ta_n = ta + 64'd16;
@@ -1565,7 +1781,7 @@ module lm1_control
         S_POP_FRAME_W1: begin
             // Write SP = restored FP+16
             rf_we     = 1'b1;
-            rf_w_addr = REG_SP;
+            rf_w_addr = banked_addr(cur_thread, REG_SP);
             rf_w_data = ta;
             ns        = S_POP_FRAME_2;
         end
@@ -1588,7 +1804,7 @@ module lm1_control
             default: begin
                 // CALL variants: write FP = ta (SP), jump to tt
                 rf_we     = 1'b1;
-                rf_w_addr = REG_FP;
+                rf_w_addr = banked_addr(cur_thread, REG_FP);
                 rf_w_data = ta;
                 cyc_inc   = 1'b1;
                 pc_n      = tt;
@@ -1606,8 +1822,8 @@ module lm1_control
                 pc_n    = pc + 64'd4;
                 ns      = S_FETCH;
             end else if (mm[mi[3:0]]) begin
-                rf_rd1_addr = REG_SP;
-                rf_rd2_addr = mb + mi;  // register to push/pop
+                rf_rd1_addr = banked_addr(cur_thread, REG_SP);
+                rf_rd2_addr = banked_addr(cur_thread, mb + mi);  // register to push/pop
 
                 if (mdir) begin
                     // POP: load from [SP]
@@ -1621,7 +1837,7 @@ module lm1_control
                         logic [XLEN-1:0] new_sp;
                         new_sp = rf_rd1_data - 64'd8;
                         rf_we      = 1'b1;
-                        rf_w_addr  = REG_SP;
+                        rf_w_addr  = banked_addr(cur_thread, REG_SP);
                         rf_w_data  = new_sp;
                         lsu_req    = 1'b1;
                         lsu_op     = LSU_STORE64;
@@ -1655,7 +1871,7 @@ module lm1_control
             if (lsu_valid) begin
                 // Write loaded value into register
                 rf_we     = 1'b1;
-                rf_w_addr = mb + mi;
+                rf_w_addr = banked_addr(cur_thread, mb + mi);
                 rf_w_data = lsu_rdata;
                 // SP += 8 — need to do in next state
                 ns = S_MULTI_SP_WR;
@@ -1664,9 +1880,9 @@ module lm1_control
 
         S_MULTI_SP_WR: begin
             // Update SP after POP
-            rf_rd1_addr = REG_SP;
+            rf_rd1_addr = banked_addr(cur_thread, REG_SP);
             rf_we       = 1'b1;
-            rf_w_addr   = REG_SP;
+            rf_w_addr   = banked_addr(cur_thread, REG_SP);
             rf_w_data   = rf_rd1_data + 64'd8;
 
             case (dr.opcode)
@@ -1779,7 +1995,7 @@ module lm1_control
 
         S_ALLOC_DONE: begin
             rf_we     = 1'b1;
-            rf_w_addr = dr.rd;
+            rf_w_addr = banked_addr(cur_thread, dr.rd);
             rf_w_data = make_ref(aa, acon);
             cyc_inc   = 1'b1;
             pc_n      = pc + 64'd4;
@@ -1805,7 +2021,7 @@ module lm1_control
                 case (dr.opcode)
                 OP_TST_SHAPE: begin
                     rf_we     = 1'b1;
-                    rf_w_addr = dr.rd;
+                    rf_w_addr = banked_addr(cur_thread, dr.rd);
                     if (is_header(lsu_rdata) &&
                         (header_shape_id(lsu_rdata) & 32'hFFFF) ==
                         {16'b0, dr.imm16})
@@ -1910,6 +2126,20 @@ module lm1_control
         end
 
         // ---------------------------------------------------------
+        // TRY_RECV_WB: write Rd2 = T (success) or NIL (empty)
+        //   opa holds VAL_T or VAL_NIL from previous cycle
+        //   dr.func[4:0] holds the Rd2 register index
+        // ---------------------------------------------------------
+        S_TRY_RECV_WB: begin
+            rf_we     = 1'b1;
+            rf_w_addr = banked_addr(cur_thread, dr.func);
+            rf_w_data = opa;  // VAL_T or VAL_NIL
+            cyc_inc   = 1'b1;
+            pc_n      = pc + 64'd4;
+            ns        = S_FETCH;
+        end
+
+        // ---------------------------------------------------------
         // ENQ_WAIT: wait for GC engine to accept command
         // ---------------------------------------------------------
         S_ENQ_WAIT: begin
@@ -1920,6 +2150,7 @@ module lm1_control
                                                            GC_CMD_COMPACT;
             gc_cmd_arg0  = opb;
             gc_cmd_arg1  = opc;
+            gc_cmd_arg2  = opa;    // region size for COPY
             if (gc_cmd_ready) begin
                 cyc_inc = 1'b1;
                 pc_n    = pc + 64'd4;

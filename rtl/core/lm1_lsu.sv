@@ -53,6 +53,12 @@ module lm1_lsu
     localparam logic [3:0] LSU_OP_LOAD64     = 4'd2;  // 64-bit word load
     localparam logic [3:0] LSU_OP_STORE64    = 4'd3;  // 64-bit word store
     localparam logic [3:0] LSU_OP_LOAD32     = 4'd4;  // 32-bit load (for LI32)
+    localparam logic [3:0] LSU_OP_LOAD_BYTE  = 4'd5;  // byte load (zero-extend)
+    localparam logic [3:0] LSU_OP_STORE_BYTE = 4'd6;  // byte store
+    localparam logic [3:0] LSU_OP_LOAD_HALF  = 4'd7;  // halfword load (zero-extend)
+    localparam logic [3:0] LSU_OP_STORE_HALF = 4'd8;  // halfword store
+    localparam logic [3:0] LSU_OP_LOAD_WORD  = 4'd9;  // 32-bit word load (zero-extend)
+    localparam logic [3:0] LSU_OP_STORE_WORD = 4'd10;  // 32-bit word store
 
     // ---------------------------------------------------------------
     // State machine
@@ -72,18 +78,22 @@ module lm1_lsu
     // ---------------------------------------------------------------
     // State register
     // ---------------------------------------------------------------
+    logic [2:0]      addr_low;  // addr[2:0] for sub-word alignment
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state    <= LSU_IDLE;
             op_reg   <= LSU_OP_NONE;
             addr_reg <= '0;
             addr_bit2<= 1'b0;
+            addr_low <= 3'b0;
         end else begin
             state <= state_next;
             if (state == LSU_IDLE && req_valid) begin
                 op_reg    <= req_op;
                 addr_reg  <= req_addr;
                 addr_bit2 <= req_addr[2];
+                addr_low  <= req_addr[2:0];
             end
         end
     end
@@ -108,21 +118,52 @@ module lm1_lsu
                 req_ready = 1'b1;
                 if (req_valid) begin
                     case (req_op)
-                        LSU_OP_IFETCH, LSU_OP_LOAD64, LSU_OP_LOAD32: begin
-                            // Issue read to SRAM
+                        LSU_OP_IFETCH, LSU_OP_LOAD64, LSU_OP_LOAD32,
+                        LSU_OP_LOAD_BYTE, LSU_OP_LOAD_HALF, LSU_OP_LOAD_WORD: begin
+                            // All loads: issue read to SRAM (8-byte aligned)
                             mem_en   = 1'b1;
                             mem_addr = {3'b0, req_addr[XLEN-1:3]};  // word address
                             state_next = LSU_WAIT_RD;
                         end
 
                         LSU_OP_STORE64: begin
-                            // Issue write to SRAM (completes in one cycle)
+                            // Full 64-bit store
                             mem_en    = 1'b1;
                             mem_we    = 1'b1;
                             mem_be    = 8'hFF;
                             mem_addr  = {3'b0, req_addr[XLEN-1:3]};
                             mem_wdata = req_wdata;
-                            // Store completes immediately
+                            state_next = LSU_DONE;
+                        end
+
+                        LSU_OP_STORE_BYTE: begin
+                            // Byte store: single byte enable
+                            mem_en    = 1'b1;
+                            mem_we    = 1'b1;
+                            mem_be    = 8'h01 << req_addr[2:0];
+                            mem_addr  = {3'b0, req_addr[XLEN-1:3]};
+                            // Replicate byte across all lanes
+                            mem_wdata = {8{req_wdata[7:0]}};
+                            state_next = LSU_DONE;
+                        end
+
+                        LSU_OP_STORE_HALF: begin
+                            // Halfword store: 2 byte enables, aligned to 2-byte boundary
+                            mem_en    = 1'b1;
+                            mem_we    = 1'b1;
+                            mem_be    = 8'h03 << {req_addr[2:1], 1'b0};
+                            mem_addr  = {3'b0, req_addr[XLEN-1:3]};
+                            mem_wdata = {4{req_wdata[15:0]}};
+                            state_next = LSU_DONE;
+                        end
+
+                        LSU_OP_STORE_WORD: begin
+                            // 32-bit word store: 4 byte enables
+                            mem_en    = 1'b1;
+                            mem_we    = 1'b1;
+                            mem_be    = req_addr[2] ? 8'hF0 : 8'h0F;
+                            mem_addr  = {3'b0, req_addr[XLEN-1:3]};
+                            mem_wdata = {2{req_wdata[31:0]}};
                             state_next = LSU_DONE;
                         end
 
@@ -153,6 +194,24 @@ module lm1_lsu
 
                     LSU_OP_LOAD32: begin
                         // 32-bit load, zero-extended to 64
+                        if (addr_bit2)
+                            resp_rdata = {32'b0, mem_rdata[63:32]};
+                        else
+                            resp_rdata = {32'b0, mem_rdata[31:0]};
+                    end
+
+                    LSU_OP_LOAD_BYTE: begin
+                        // Extract byte at addr[2:0], zero-extend to 64
+                        resp_rdata = {56'b0, mem_rdata[addr_low*8 +: 8]};
+                    end
+
+                    LSU_OP_LOAD_HALF: begin
+                        // Extract halfword at addr[2:1]*16, zero-extend to 64
+                        resp_rdata = {48'b0, mem_rdata[{addr_low[2:1], 1'b0}*8 +: 16]};
+                    end
+
+                    LSU_OP_LOAD_WORD: begin
+                        // Extract 32-bit word at addr[2]*32, zero-extend to 64
                         if (addr_bit2)
                             resp_rdata = {32'b0, mem_rdata[63:32]};
                         else

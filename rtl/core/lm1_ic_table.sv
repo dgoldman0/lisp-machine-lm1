@@ -29,7 +29,7 @@ module lm1_ic_table
     input  logic [XLEN-1:0]   inst_target
 );
 
-    localparam int N = 16;
+    localparam int N = 64;
 
     // Entry storage
     logic               valid [0:N-1];
@@ -38,7 +38,7 @@ module lm1_ic_table
     logic [XLEN-1:0]    e_tgt [0:N-1];
 
     // FIFO evict pointer
-    logic [3:0] evict_ptr;
+    logic [5:0] evict_ptr;
 
     // Combinational lookup
     always_comb begin
@@ -69,7 +69,7 @@ module lm1_ic_table
             e_pc[evict_ptr]  <= inst_pc;
             e_shp[evict_ptr] <= inst_shape;
             e_tgt[evict_ptr] <= inst_target;
-            evict_ptr        <= evict_ptr + 4'd1;
+            evict_ptr        <= evict_ptr + 6'd1;
         end
     end
 

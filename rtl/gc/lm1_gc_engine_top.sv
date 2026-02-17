@@ -23,6 +23,7 @@ module lm1_gc_engine_top
     input  logic [3:0]         cmd_op,
     input  logic [XLEN-1:0]   cmd_arg0,       // region base  / src_base
     input  logic [XLEN-1:0]   cmd_arg1,       // region size  / dst_base
+    input  logic [XLEN-1:0]   cmd_arg2,       // copy: region size (from rd)
     output logic               cmd_ready,
     output logic               busy,
 
@@ -181,7 +182,7 @@ module lm1_gc_engine_top
         .cmd_ready    (cp_cmd_ready),
         .cmd_src_base (cmd_arg0),
         .cmd_dst_base (cmd_arg1),
-        .cmd_size     (cmd_arg1),     // for COMPACT, size = arg1 as well
+        .cmd_size     (cmd_arg2),     // region size from rd register
         .mem_rd_en    (cp_mem_rd_en),
         .mem_rd_addr  (cp_mem_rd_addr),
         .mem_rd_data  (cp_mem_rd_data),

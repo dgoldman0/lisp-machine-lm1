@@ -46,6 +46,7 @@ if [ ! -f "$BUILD_DIR/obj_dir/Vlm1_tb" ]; then
         "$ROOT/rtl/core/lm1_ic_table.sv" \
         "$ROOT/rtl/core/lm1_msg_queue.sv" \
         "$ROOT/rtl/core/lm1_perf_counters.sv" \
+        "$ROOT/rtl/core/lm1_icache.sv" \
         "$ROOT/rtl/core/lm1_cpu.sv" \
         "$ROOT/rtl/tech/lm1_sram_sp.sv" \
         "$ROOT/tb/lm1_tb.sv"

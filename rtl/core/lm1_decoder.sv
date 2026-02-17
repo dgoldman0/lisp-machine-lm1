@@ -149,6 +149,15 @@ module lm1_decoder
                 is_mem_store = 1'b1;
             end
 
+            // --- Sub-word raw loads/stores ---
+            OP_LDB, OP_LDH, OP_LDW: begin
+                is_mem_load = 1'b1;
+                rf_we       = 1'b1;
+            end
+            OP_STB, OP_STH, OP_STW: begin
+                is_mem_store = 1'b1;
+            end
+
             // --- Tagged field access ---
             OP_LD, OP_LD_CAR_CDR: begin
                 is_mem_load    = 1'b1;
@@ -259,10 +268,12 @@ module lm1_decoder
                 is_nop = 1'b1;
             end
 
-            // --- Region/bulk (reserved, treat as NOP) ---
+            // --- Region/bulk: GC engine commands ---
             OP_ENQ_SCAN, OP_ENQ_COPY,
             OP_ENQ_FIXUP, OP_ENQ_COMPACT: begin
-                is_nop = 1'b1;
+                is_system      = 1'b1;
+                is_multi_cycle = 1'b1;
+                rf_rd_rs2      = 1'b1;  // rs2 carries second region arg
             end
 
             default: begin

@@ -55,6 +55,7 @@ module lm1_tile
     output logic [3:0]         gc_cmd_op,
     output logic [XLEN-1:0]   gc_cmd_arg0,
     output logic [XLEN-1:0]   gc_cmd_arg1,
+    output logic [XLEN-1:0]   gc_cmd_arg2,
     input  logic               gc_cmd_ready,
     input  logic               gc_engine_busy,
 
@@ -82,12 +83,29 @@ module lm1_tile
     assign thread_id_w = '0;
 
     // ---------------------------------------------------------------
+    // Clock gating: gate core clock when tile is halted and no
+    // external memory or NoC activity
+    // ---------------------------------------------------------------
+    logic core_clk_en;
+    logic gated_clk;
+
+    assign core_clk_en = ~halted | ext_mem_en |
+                          noc_mq_wr_en | noc_mq_rd_en;
+
+    lm1_clock_gate u_clk_gate (
+        .clk  (clk),
+        .en   (core_clk_en),
+        .te   (1'b0),        // no scan mode yet
+        .gclk (gated_clk)
+    );
+
+    // ---------------------------------------------------------------
     // DOP Core
     // ---------------------------------------------------------------
     lm1_cpu #(
         .MEM_DEPTH_LOG2 (TILE_MEM_LOG2)
     ) u_core (
-        .clk            (clk),
+        .clk            (gated_clk),
         .rst_n          (rst_n),
         .cfg_tile_id    (tile_id_w),
         .cfg_thread_id  (thread_id_w),
@@ -108,6 +126,7 @@ module lm1_tile
         .gc_cmd_op      (gc_cmd_op),
         .gc_cmd_arg0    (gc_cmd_arg0),
         .gc_cmd_arg1    (gc_cmd_arg1),
+        .gc_cmd_arg2    (gc_cmd_arg2),
         .gc_cmd_ready   (gc_cmd_ready),
         .gc_engine_busy (gc_engine_busy),
         // External message queue port (NoC ↔ queue)
@@ -121,20 +140,15 @@ module lm1_tile
         .ext_mq_rd_valid(noc_mq_rd_valid),
         // Queue status
         .mq_empty       (mq_empty),
-        .mq_full        (mq_full)
+        .mq_full        (mq_full),
+        // Cluster crossbar port
+        .xbar_req_valid (xbar_req_valid),
+        .xbar_req_we    (xbar_req_we),
+        .xbar_req_addr  (xbar_req_addr),
+        .xbar_req_wdata (xbar_req_wdata),
+        .xbar_req_ready (xbar_req_ready),
+        .xbar_resp_data (xbar_resp_data),
+        .xbar_resp_valid(xbar_resp_valid)
     );
-
-    // ---------------------------------------------------------------
-    // Cluster crossbar port — stub for now
-    //
-    // In a full implementation the tile SRAM would have a second
-    // port and the crossbar interface would arbitrate tile-local
-    // vs cluster-SRAM accesses based on address ranges.
-    // For now, the crossbar port is inactive (no cluster accesses).
-    // ---------------------------------------------------------------
-    assign xbar_req_valid = 1'b0;
-    assign xbar_req_we    = 1'b0;
-    assign xbar_req_addr  = '0;
-    assign xbar_req_wdata = '0;
 
 endmodule

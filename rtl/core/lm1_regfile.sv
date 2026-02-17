@@ -1,40 +1,39 @@
 // ============================================================================
-// LM-1 Register File  (32 x 64-bit)
+// LM-1 Register File  (128 x 64-bit — 4 threads × 32 GPRs)
 //
 // Synchronous write, asynchronous read (combinational read ports).
 // Two independent read ports (A, B) and one write port (W).
 //
-// NOTE: r0 is NOT hardwired to zero — all 32 registers are general-purpose.
+// Address format: {thread_id[1:0], reg_idx[4:0]} — 7 bits total.
+// Each thread has its own bank of 32 registers.
 //
-// For ASIC:  This infers a register file from flip-flops.  For area
-//            optimization, replace with a compiled RF macro.
-// For FPGA:  Distributed RAM or LUT-based — appropriate for 32x64.
+// NOTE: r0 is NOT hardwired to zero — all 32 registers are general-purpose.
 // ============================================================================
 module lm1_regfile
     import lm1_pkg::*;
 (
-    input  logic                    clk,
-    input  logic                    rst_n,
+    input  logic                      clk,
+    input  logic                      rst_n,
 
     // Read port A (combinational)
-    input  logic [REG_IDX_W-1:0]   ra_addr,
-    output logic [XLEN-1:0]        ra_data,
+    input  logic [FULL_REG_W-1:0]     ra_addr,
+    output logic [XLEN-1:0]           ra_data,
 
     // Read port B (combinational)
-    input  logic [REG_IDX_W-1:0]   rb_addr,
-    output logic [XLEN-1:0]        rb_data,
+    input  logic [FULL_REG_W-1:0]     rb_addr,
+    output logic [XLEN-1:0]           rb_data,
 
     // Write port
-    input  logic                    w_en,
-    input  logic [REG_IDX_W-1:0]   w_addr,
-    input  logic [XLEN-1:0]        w_data
+    input  logic                      w_en,
+    input  logic [FULL_REG_W-1:0]     w_addr,
+    input  logic [XLEN-1:0]           w_data
 );
 
-    // 32 registers, each 64 bits
-    logic [XLEN-1:0] regs [0:NREGS-1];
+    // 128 registers (4 threads × 32), each 64 bits
+    localparam int TOTAL_REGS = NUM_THREADS * NREGS;
+    logic [XLEN-1:0] regs [0:TOTAL_REGS-1];
 
     // Asynchronous read with write-through (bypass)
-    // If reading the same register being written, return the new value.
     always_comb begin
         if (w_en && (ra_addr == w_addr))
             ra_data = w_data;
@@ -52,8 +51,8 @@ module lm1_regfile
     // Synchronous write
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            for (int i = 0; i < NREGS; i++)
-                regs[i] <= '0;
+            for (int i = 0; i < TOTAL_REGS; i++)
+                regs[i] = '0;  // blocking OK in reset (Verilator compat)
         end else if (w_en) begin
             regs[w_addr] <= w_data;
         end
