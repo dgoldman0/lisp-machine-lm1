@@ -148,10 +148,12 @@ class Compiler:
         self._label_counter = 0
         self._string_table: list[tuple[str, str]] = []  # (label, string)
         self._globals: dict[str, str] = {}  # symbol_name → asm_label
+        self._global_inits: dict[str, object] = {}  # symbol_name → init value (int or None)
         self._functions: dict[str, str] = {}  # func_name → asm_label
         self._builtins: set[str] = set()
         self._inline_builtins: dict[str, str] = {}  # name → handler method name
         self._current_fn_saved_regs: list[int] = []  # callee-saved regs pushed by current defun
+        self._macros: dict[str, tuple[list[str], list]] = {}  # name → (params, body_template)
 
         # Register inline builtins
         for name in ('car', 'cdr', 'cons', '+', '-', '*', '/', 'eq',
@@ -211,9 +213,14 @@ class Compiler:
         if self._globals:
             result.append("")
             result.append("; ===== Global Variables =====")
+            result.append("    .ALIGN 8")
             for name, label in self._globals.items():
                 result.append(f"{label}:")
-                result.append(f"    .WORD 5")  # initialized to NIL
+                init_val = self._global_inits.get(name)
+                if init_val is not None:
+                    result.append(f"    .WORD {tag_fixnum(init_val)}")
+                else:
+                    result.append(f"    .WORD 5")  # initialized to NIL
         return '\n'.join(result) + '\n'
 
     # ------------------------------------------------------------------
@@ -234,6 +241,12 @@ class Compiler:
                 return
             elif op == 'defvar':
                 self._compile_defvar(form)
+                return
+            elif op == 'defmacro':
+                self._compile_defmacro(form)
+                return
+            elif op == 'defstruct':
+                self._compile_defstruct(form)
                 return
         # Expression at top level: compile and discard result
         env = {}
@@ -300,9 +313,96 @@ class Compiler:
     def _compile_defvar(self, form) -> None:
         """(defvar name [initial-value])"""
         name = form[1]
-        label = f"_var_{name}"
+        label = f"_var_{self._sanitize_label(name)}"
         self._globals[name] = label
-        # Don't emit storage here — we'll emit it in the data section
+        # Store initial value for data section (literal ints only for now)
+        if len(form) >= 3 and isinstance(form[2], int):
+            self._global_inits[name] = form[2]
+        else:
+            self._global_inits[name] = None  # initialized to NIL
+
+    # ------------------------------------------------------------------
+    # defmacro
+    # ------------------------------------------------------------------
+
+    def _compile_defmacro(self, form) -> None:
+        """(defmacro name (params...) body)
+
+        Register a compile-time macro. When 'name' appears as an operator,
+        the body template is instantiated with params replaced by actual args.
+        """
+        if len(form) < 4:
+            raise CompilerError(f"defmacro requires name, params, body: {form}")
+        name = form[1]
+        params = form[2]
+        body = form[3]  # single body expression template
+        self._macros[name] = (params, body)
+
+    def _expand_macro(self, name: str, args: list) -> object:
+        """Expand a macro call by substituting args into the body template."""
+        params, body = self._macros[name]
+        if len(args) != len(params):
+            raise CompilerError(
+                f"Macro {name}: expected {len(params)} args, got {len(args)}")
+        bindings = dict(zip(params, args))
+        return self._substitute(body, bindings)
+
+    def _substitute(self, template, bindings: dict) -> object:
+        """Substitute parameter names in a template with bound values."""
+        if isinstance(template, str):
+            if template in bindings:
+                return bindings[template]
+            return template
+        elif isinstance(template, list):
+            return [self._substitute(e, bindings) for e in template]
+        else:
+            return template  # int, bool, None, etc.
+
+    # ------------------------------------------------------------------
+    # defstruct
+    # ------------------------------------------------------------------
+
+    def _compile_defstruct(self, form) -> None:
+        """(defstruct name field1 field2 ...)
+
+        Generates:
+          (defun make-name (field1 field2 ...) ...)  — constructor
+          (defun name-field1 (obj) ...)              — accessor for each field
+          (defun set-name-field1! (obj val) ...)     — setter for each field
+        """
+        name = form[1]
+        fields = form[2:]
+
+        # Constructor: (defun make-name (f1 f2 ...) (let ((v (make-vector N))) ...))
+        n = len(fields)
+        make_name = f"make-{name}"
+        # Build: (defun make-name (f1 f2 ...)
+        #          (let ((v (make-vector n)))
+        #            (vector-set! v 0 f1)
+        #            (vector-set! v 1 f2)
+        #            ...
+        #            v))
+        let_body = []
+        for i, f in enumerate(fields):
+            let_body.append(['vector-set!', 'v', i, f])
+        let_body.append('v')
+        constructor = ['defun', make_name, list(fields),
+                       ['let', [['v', ['make-vector', n]]]] + let_body]
+        self._compile_defun(constructor)
+
+        # Accessors: (defun name-field (obj) (vector-ref obj idx))
+        for i, f in enumerate(fields):
+            accessor_name = f"{name}-{f}"
+            accessor = ['defun', accessor_name, ['obj'],
+                        ['vector-ref', 'obj', i]]
+            self._compile_defun(accessor)
+
+        # Setters: (defun set-name-field! (obj val) (vector-set! obj idx val))
+        for i, f in enumerate(fields):
+            setter_name = f"set-{name}-{f}!"
+            setter = ['defun', setter_name, ['obj', 'val'],
+                      ['vector-set!', 'obj', i, 'val']]
+            self._compile_defun(setter)
 
     # ------------------------------------------------------------------
     # Expression compilation
@@ -353,6 +453,11 @@ class Compiler:
     def _compile_form(self, form: list, env: dict, dest: int, tail: bool = False) -> None:
         """Compile a compound form (operator + arguments)."""
         op = form[0]
+
+        # Macro expansion
+        if isinstance(op, str) and op in self._macros:
+            expanded = self._expand_macro(op, form[1:])
+            return self._compile_expr(expanded, env, dest=dest, tail=tail)
 
         # Special forms
         if op == 'quote':
@@ -681,8 +786,10 @@ class Compiler:
         elif var in self._globals:
             label = self._globals[var]
             self._compile_expr(form[2], env, dest=dest)
-            self._emit_instr(f"LI r{self.SCRATCH_REGS[0]}, {label}")
-            self._emit_instr(f"STR r{self.SCRATCH_REGS[0]}, r{dest}, 0")
+            # Use a scratch register different from dest for the address
+            addr_reg = self.SCRATCH_REGS[1] if dest == self.SCRATCH_REGS[0] else self.SCRATCH_REGS[0]
+            self._emit_instr(f"LI r{addr_reg}, {label}")
+            self._emit_instr(f"STR r{addr_reg}, r{dest}, 0")
         else:
             raise CompilerError(f"set!: undefined variable: {var}")
 

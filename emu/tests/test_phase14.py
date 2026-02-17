@@ -772,3 +772,125 @@ def test_halt_compiler():
     out, _ = _compile_direct(forms)
     # Only "1" should be printed — halt stops before "2"
     assert out == "1"
+
+
+# ===================================================================
+# Stage 7: defvar/globals, defmacro, defstruct
+# ===================================================================
+
+@test("defvar_basic", batch="phase14_stage7")
+def test_defvar_basic():
+    """defvar creates a global variable initialized to NIL."""
+    forms = parse("""
+        (defvar counter)
+        (defun main ()
+          (set! counter 42)
+          (print-fixnum counter))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "42"
+
+
+@test("defvar_init", batch="phase14_stage7")
+def test_defvar_init():
+    """defvar with initial value."""
+    forms = parse("""
+        (defvar start-val 100)
+        (defun main ()
+          (print-fixnum start-val)
+          (set! start-val (+ start-val 5))
+          (print-fixnum start-val))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "100105"
+
+
+@test("defvar_multi_fn", batch="phase14_stage7")
+def test_defvar_multi_fn():
+    """Global variable shared between functions."""
+    forms = parse("""
+        (defvar total 0)
+        (defun add-to-total (n)
+          (set! total (+ total n)))
+        (defun main ()
+          (add-to-total 10)
+          (add-to-total 20)
+          (add-to-total 30)
+          (print-fixnum total))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "60"
+
+
+@test("defmacro_basic", batch="phase14_stage7")
+def test_defmacro_basic():
+    """Simple macro: (inc x) → (+ x 1)."""
+    forms = parse("""
+        (defmacro inc (x) (+ x 1))
+        (defun main ()
+          (print-fixnum (inc 5)))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "6"
+
+
+@test("defmacro_swap", batch="phase14_stage7")
+def test_defmacro_swap():
+    """Macro: (swap! a b) → (let ((tmp a)) (set! a b) (set! b tmp))."""
+    forms = parse("""
+        (defmacro swap! (a b) (let ((tmp a)) (set! a b) (set! b tmp)))
+        (defun main ()
+          (let* ((x 10) (y 20))
+            (swap! x y)
+            (print-fixnum x)
+            (print-fixnum y)))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "2010"
+
+
+@test("defstruct_basic", batch="phase14_stage7")
+def test_defstruct_basic():
+    """defstruct generates constructor and accessors."""
+    forms = parse("""
+        (defstruct point x y)
+        (defun main ()
+          (let ((p (make-point 3 7)))
+            (print-fixnum (point-x p))
+            (print-fixnum (point-y p))))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "37"
+
+
+@test("defstruct_setter", batch="phase14_stage7")
+def test_defstruct_setter():
+    """defstruct generates setters."""
+    forms = parse("""
+        (defstruct point x y)
+        (defun main ()
+          (let ((p (make-point 1 2)))
+            (set-point-x! p 10)
+            (set-point-y! p 20)
+            (print-fixnum (point-x p))
+            (print-fixnum (point-y p))))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "1020"
+
+
+@test("defstruct_multiple", batch="phase14_stage7")
+def test_defstruct_multiple():
+    """Multiple struct instances."""
+    forms = parse("""
+        (defstruct vec3 x y z)
+        (defun vec3-sum (v)
+          (+ (vec3-x v) (+ (vec3-y v) (vec3-z v))))
+        (defun main ()
+          (let* ((a (make-vec3 1 2 3))
+                 (b (make-vec3 10 20 30)))
+            (print-fixnum (+ (vec3-sum a) (vec3-sum b)))))
+    """)
+    out, _ = _compile_direct(forms)
+    # (1+2+3) + (10+20+30) = 6 + 60 = 66
+    assert out == "66"
