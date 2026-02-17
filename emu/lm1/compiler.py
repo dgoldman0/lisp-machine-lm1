@@ -163,7 +163,11 @@ class Compiler:
                       'string-length', 'string-ref', 'string-set!',
                       'print-string', 'char->fixnum', 'fixnum->char',
                       'make-vector', 'vector-ref', 'vector-set!',
-                      'vector-length', 'funcall'):
+                      'vector-length', 'funcall',
+                      'vdi-call', 'vdi-set-mode', 'vdi-fill-rect',
+                      'vdi-draw-line', 'vdi-read-pixel', 'vdi-present',
+                      'vdi-draw-char', 'vdi-get-mode',
+                      'halt'):
             self._builtins.add(name)
 
     def _label(self, prefix: str = "L") -> str:
@@ -1058,8 +1062,69 @@ class Compiler:
             # Restore saved registers
             for reg in reversed(used_saved):
                 self._emit_instr(f"POP r{reg}")
+
+        # -- VDI traps --
+        elif op == 'vdi-call':
+            # (vdi-call func-code arg1 arg2 ...)
+            # Generic VDI trap: func-code → r1, args → r2..r8
+            self._compile_vdi_trap_generic(args, env, dest)
+        elif op == 'vdi-set-mode':
+            self._compile_vdi_trap_fixed(0, args, env, dest)
+        elif op == 'vdi-fill-rect':
+            self._compile_vdi_trap_fixed(1, args, env, dest)
+        elif op == 'vdi-draw-line':
+            self._compile_vdi_trap_fixed(8, args, env, dest)
+        elif op == 'vdi-draw-char':
+            self._compile_vdi_trap_fixed(4, args, env, dest)
+        elif op == 'vdi-read-pixel':
+            self._compile_vdi_trap_fixed(7, args, env, dest)
+        elif op == 'vdi-present':
+            self._compile_vdi_trap_fixed(11, args, env, dest)
+        elif op == 'vdi-get-mode':
+            # (vdi-get-mode) → returns width as tagged fixnum
+            # Also sets r2 = height, but we only return r1
+            self._emit_instr(f"LI r1, {tag_fixnum(9)}")
+            self._emit_instr("TRAP 0x83")
+            if dest != 1:
+                self._emit_instr(f"MOV r{dest}, r1")
+
+        # -- System --
+        elif op == 'halt':
+            self._emit_instr("HALT")
+
         else:
             raise CompilerError(f"Unknown builtin: {op}")
+
+    def _compile_vdi_trap_generic(self, args: list, env: dict, dest: int) -> None:
+        """(vdi-call func-code arg1 arg2 ...)
+        Evaluate func-code → r1, arg1 → r2, arg2 → r3, etc. Then TRAP 0x83.
+        """
+        if len(args) > 8:
+            raise CompilerError("vdi-call: too many arguments (max 8)")
+        for arg in args:
+            self._compile_expr(arg, env, dest=self.SCRATCH_REGS[0])
+            self._emit_instr(f"PUSH r{self.SCRATCH_REGS[0]}")
+        for i in range(len(args) - 1, -1, -1):
+            self._emit_instr(f"POP r{i + 1}")
+        self._emit_instr("TRAP 0x83")
+        if dest != 1:
+            self._emit_instr(f"MOV r{dest}, r1")
+
+    def _compile_vdi_trap_fixed(self, func_code: int, args: list, env: dict, dest: int) -> None:
+        """Compile a named VDI trap with fixed function code.
+        Evaluate args → r2..rN+1, then set r1 = func_code, TRAP 0x83.
+        """
+        if len(args) > 7:
+            raise CompilerError(f"VDI trap: too many arguments ({len(args)})")
+        for arg in args:
+            self._compile_expr(arg, env, dest=self.SCRATCH_REGS[0])
+            self._emit_instr(f"PUSH r{self.SCRATCH_REGS[0]}")
+        for i in range(len(args) - 1, -1, -1):
+            self._emit_instr(f"POP r{i + 2}")
+        self._emit_instr(f"LI r1, {tag_fixnum(func_code)}")
+        self._emit_instr("TRAP 0x83")
+        if dest != 1:
+            self._emit_instr(f"MOV r{dest}, r1")
 
     def _compile_arith(self, instr: str, args: list, env: dict, dest: int) -> None:
         """Compile binary arithmetic: (op a b).

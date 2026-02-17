@@ -75,6 +75,50 @@ def _compile_direct(lisp_forms, max_instructions=200_000):
     return stdout.getvalue(), emu
 
 
+def _compile_direct_vdi(lisp_forms, width=64, height=64, max_instructions=200_000):
+    """Cross-compile and run with VDI attached, for testing VDI traps."""
+    from lm1.vdi import VDI
+    cc = Compiler()
+
+    cc._emit_label("_start")
+    cc._emit_instr("LI sp, 0x3FF8")
+    cc._emit_instr("LI fp, 0")
+    cc._emit_instr("BR _call_main")
+    cc._emit("")
+
+    cc.emit_putchar()
+    cc.emit_print_fixnum()
+    cc.emit_print_value()
+    cc.emit_newline()
+
+    cc.compile_toplevel(lisp_forms)
+
+    cc._emit_label("_call_main")
+    cc.emit_call_main('main')
+
+    asm_source = cc.get_output()
+
+    asm = Assembler()
+    os_words = asm.assemble_to_words(asm_source)
+
+    stdout = io.StringIO()
+    vdi = VDI(width=width, height=height, headless=True)
+    emu = Emulator(
+        mem_size=1024 * 1024,
+        nursery_base=NURSERY_BASE,
+        nursery_size=NURSERY_SIZE,
+        oldgen_base=OLDGEN_BASE,
+        oldgen_size=OLDGEN_SIZE,
+        stdout=stdout,
+        vdi=vdi,
+    )
+    emu.mem.load_instructions(0, os_words)
+    for t in emu.threads:
+        t.pc = 0
+    emu.run(max_instructions=max_instructions)
+    return stdout.getvalue(), emu, vdi
+
+
 def _last_line(output):
     """Get the last non-empty line from output."""
     lines = [l for l in output.strip().split('\n') if l.strip()]
@@ -657,3 +701,74 @@ def test_closure_multi_instances():
     """)
     out, _ = _compile_direct(forms)
     assert out == "1317"
+
+
+# ===================================================================
+# Stage 6: VDI traps & system interface
+# ===================================================================
+
+@test("vdi_fill_rect_compiler", batch="phase14_stage6")
+def test_vdi_fill_rect_compiler():
+    """Compile vdi-fill-rect and verify pixel via Python VDI."""
+    forms = parse("""
+        (defun main ()
+          (vdi-fill-rect 10 10 20 20 255))
+    """)
+    out, emu, vdi = _compile_direct_vdi(forms)
+    # Pixel inside the rect should be 255 (blue)
+    assert vdi.read_pixel(15, 15) == 255
+    # Pixel outside the rect should be 0 (black)
+    assert vdi.read_pixel(0, 0) == 0
+
+
+@test("vdi_read_pixel_compiler", batch="phase14_stage6")
+def test_vdi_read_pixel_compiler():
+    """vdi-read-pixel returns color through compiler."""
+    forms = parse("""
+        (defun main ()
+          (vdi-fill-rect 5 5 10 10 42)
+          (print-fixnum (vdi-read-pixel 8 8)))
+    """)
+    out, emu, vdi = _compile_direct_vdi(forms)
+    assert out == "42"
+
+
+@test("vdi_draw_line_compiler", batch="phase14_stage6")
+def test_vdi_draw_line_compiler():
+    """vdi-draw-line draws a horizontal line."""
+    forms = parse("""
+        (defun main ()
+          (vdi-draw-line 0 10 63 10 100))
+    """)
+    out, emu, vdi = _compile_direct_vdi(forms)
+    # Pixel on the line
+    assert vdi.read_pixel(32, 10) == 100
+    # Pixel off the line
+    assert vdi.read_pixel(32, 20) == 0
+
+
+@test("vdi_call_generic", batch="phase14_stage6")
+def test_vdi_call_generic():
+    """Generic vdi-call with explicit function code."""
+    forms = parse("""
+        (defun main ()
+          (vdi-call 1 10 10 5 5 999)
+          (print-fixnum (vdi-call 7 12 12)))
+    """)
+    out, emu, vdi = _compile_direct_vdi(forms)
+    # vdi-call 1 = fill-rect, vdi-call 7 = read-pixel
+    assert out == "999"
+
+
+@test("halt_compiler", batch="phase14_stage6")
+def test_halt_compiler():
+    """halt stops execution immediately."""
+    forms = parse("""
+        (defun main ()
+          (print-fixnum 1)
+          (halt)
+          (print-fixnum 2))
+    """)
+    out, _ = _compile_direct(forms)
+    # Only "1" should be printed — halt stops before "2"
+    assert out == "1"
