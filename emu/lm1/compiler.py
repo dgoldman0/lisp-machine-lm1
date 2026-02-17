@@ -163,7 +163,7 @@ class Compiler:
                       'string-length', 'string-ref', 'string-set!',
                       'print-string', 'char->fixnum', 'fixnum->char',
                       'make-vector', 'vector-ref', 'vector-set!',
-                      'vector-length'):
+                      'vector-length', 'funcall'):
             self._builtins.add(name)
 
     def _label(self, prefix: str = "L") -> str:
@@ -507,41 +507,145 @@ class Compiler:
             d = dest if is_last else self.SCRATCH_REGS[0]
             self._compile_expr(e, new_env, dest=d, tail=(tail and is_last))
 
+    # Closure register — the register where the closure ref is passed
+    CLOSURE_REG = 15  # r15 (last scratch register)
+
+    def _free_vars(self, exprs: list, params: set, env: dict) -> list[str]:
+        """Find free variables: names used in exprs that are in env but not in params."""
+        free = []
+        seen = set()
+
+        def walk(expr):
+            if isinstance(expr, str):
+                if expr in env and expr not in params and expr not in seen:
+                    seen.add(expr)
+                    free.append(expr)
+            elif isinstance(expr, list) and expr:
+                op = expr[0]
+                if op == 'quote':
+                    return  # don't walk into quoted data
+                if op == 'lambda':
+                    # Walk lambda body but add its params to the "don't capture" set
+                    inner_params = set(expr[1]) if len(expr) > 1 else set()
+                    for e in expr[2:]:
+                        walk_with_params(e, params | inner_params)
+                    return
+                for e in expr:
+                    walk(e)
+
+        def walk_with_params(expr, ps):
+            if isinstance(expr, str):
+                if expr in env and expr not in ps and expr not in seen:
+                    seen.add(expr)
+                    free.append(expr)
+            elif isinstance(expr, list) and expr:
+                op = expr[0]
+                if op == 'quote':
+                    return
+                if op == 'lambda':
+                    inner_params = set(expr[1]) if len(expr) > 1 else set()
+                    for e in expr[2:]:
+                        walk_with_params(e, ps | inner_params)
+                    return
+                for e in expr:
+                    walk_with_params(e, ps)
+
+        for e in exprs:
+            walk(e)
+        return free
+
     def _compile_lambda(self, form: list, env: dict, dest: int) -> None:
         """(lambda (params...) body...)
 
-        For simplicity, compile as a direct function (no closure capture).
-        The lambda becomes a labeled function, and the "closure" is just
-        the function address.
+        Compiles as a closure: allocates a closure object with captured
+        free variables from the enclosing scope.
         """
         params = form[1]
         body = form[2:]
         fn_label = self._label("lambda")
         end_label = self._label("endlambda")
 
+        # Find free variables
+        param_set = set(params)
+        free = self._free_vars(body, param_set, env)
+
         # Skip over the lambda body in the instruction stream
         self._emit_instr(f"BR {end_label}")
 
-        # Emit the lambda body as a function
+        # Emit the lambda body
         self._emit_label(fn_label)
         fn_env = {}
-        saved_env = {}
-        for i, param in enumerate(params):
-            if i < len(self.ARG_REGS):
-                # Move arg to saved register
-                save_reg = self.SAVED_REGS[i]
-                self._emit_instr(f"MOV r{save_reg}, r{self.ARG_REGS[i]}")
-                saved_env[param] = save_reg
-        fn_env = saved_env
 
+        # Save callee-saved regs we'll use
+        used_saved = []
+
+        # Set up params (from arg registers)
+        for i, param in enumerate(params):
+            if i >= len(self.ARG_REGS):
+                raise CompilerError(f"Too many lambda parameters")
+            save_reg = self.SAVED_REGS[len(used_saved)]
+            used_saved.append(save_reg)
+            fn_env[param] = save_reg
+
+        # Push callee-saved regs
+        for reg in used_saved:
+            self._emit_instr(f"PUSH r{reg}")
+
+        # Move args to callee-saved regs
+        for i, param in enumerate(params):
+            self._emit_instr(f"MOV r{fn_env[param]}, r{self.ARG_REGS[i]}")
+
+        # Load captured variables from closure env slots
+        # Closure ref is in CLOSURE_REG (r15)
+        if free:
+            # Save closure ref to a callee-saved reg to access env slots
+            closure_save = self.SAVED_REGS[len(used_saved)]
+            used_saved.append(closure_save)
+            self._emit_instr(f"PUSH r{closure_save}")
+            self._emit_instr(f"MOV r{closure_save}, r{self.CLOSURE_REG}")
+            for i, var in enumerate(free):
+                env_reg = self.SAVED_REGS[len(used_saved)]
+                used_saved.append(env_reg)
+                self._emit_instr(f"PUSH r{env_reg}")
+                # Load env slot i+1 (slot 0 is code pointer) via LD.FLD
+                self._emit_instr(f"LD.FLD r{env_reg}, r{closure_save}, {i + 1}")
+                fn_env[var] = env_reg
+
+        # Track saved regs for potential tail calls inside lambda
+        old_saved = self._current_fn_saved_regs
+        self._current_fn_saved_regs = list(used_saved)
+
+        # Compile body
         for i, e in enumerate(body):
-            d = self.RET_REG if i == len(body) - 1 else self.SCRATCH_REGS[0]
-            self._compile_expr(e, fn_env, dest=d)
+            is_last = (i == len(body) - 1)
+            d = self.RET_REG if is_last else self.SCRATCH_REGS[0]
+            self._compile_expr(e, fn_env, dest=d, tail=is_last)
+
+        self._current_fn_saved_regs = old_saved
+
+        # Epilogue
+        for reg in reversed(used_saved):
+            self._emit_instr(f"POP r{reg}")
         self._emit_instr("RET")
 
         self._emit_label(end_label)
-        # Load function address into dest
-        self._emit_instr(f"LI r{dest}, {fn_label}")
+
+        # Allocate closure object at the call site
+        if free:
+            # Load code address into a scratch register
+            self._emit_instr(f"LI r{self.SCRATCH_REGS[0]}, {fn_label}")
+            # ALLOC.CLOSURE dest, rs_code, env_size
+            self._emit_instr(f"ALLOC.CLOSURE r{dest}, r{self.SCRATCH_REGS[0]}, {len(free)}")
+            # Store captured variables into env slots
+            for i, var in enumerate(free):
+                var_reg = env[var]
+                # ST.FLD closure, value, field_idx — field 1..N are env slots
+                self._emit_instr(f"ST.FLD r{dest}, r{var_reg}, {i + 1}")
+        else:
+            # No captures — just load the code address as a "closure"
+            # Still allocate a proper closure object for CALL.CLOSURE to work
+            self._emit_instr(f"LI r{self.SCRATCH_REGS[0]}, {fn_label}")
+            self._emit_instr(f"ALLOC.CLOSURE r{dest}, r{self.SCRATCH_REGS[0]}, 0")
 
     def _compile_and(self, form: list, env: dict, dest: int) -> None:
         """(and expr1 expr2 ...) — short-circuit"""
@@ -919,6 +1023,41 @@ class Compiler:
             self._emit_instr(f"ADD r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[1]}")
             self._emit_instr(f"STR r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[2]}, 0")
             self._emit_instr(f"LI r{dest}, 5")  # return NIL
+        elif op == 'funcall':
+            # (funcall closure-expr arg1 arg2 ...)
+            # Evaluate closure, put in CLOSURE_REG; eval args into r1..rN;
+            # CALL.CLOSURE CLOSURE_REG
+            closure_expr = args[0]
+            call_args = args[1:]
+            if len(call_args) > len(self.ARG_REGS) - 1:
+                raise CompilerError(f"Too many arguments for funcall")
+            # Save env registers
+            used_saved = sorted(set(r for r in env.values() if r in self.SAVED_REGS))
+            for reg in used_saved:
+                self._emit_instr(f"PUSH r{reg}")
+            # Evaluate closure
+            self._compile_expr(closure_expr, env, dest=self.CLOSURE_REG)
+            self._emit_instr(f"PUSH r{self.CLOSURE_REG}")
+            # Evaluate args
+            for i, arg in enumerate(call_args):
+                self._compile_expr(arg, env, dest=self.SCRATCH_REGS[0])
+                if i < len(call_args) - 1:
+                    self._emit_instr(f"PUSH r{self.SCRATCH_REGS[0]}")
+            # Pop args into arg registers
+            if call_args:
+                last_idx = len(call_args) - 1
+                self._emit_instr(f"MOV r{self.ARG_REGS[last_idx]}, r{self.SCRATCH_REGS[0]}")
+                for i in range(last_idx - 1, -1, -1):
+                    self._emit_instr(f"POP r{self.ARG_REGS[i]}")
+            # Pop closure ref
+            self._emit_instr(f"POP r{self.CLOSURE_REG}")
+            # Call
+            self._emit_instr(f"CALL.CLOSURE r{self.CLOSURE_REG}")
+            if dest != self.RET_REG:
+                self._emit_instr(f"MOV r{dest}, r{self.RET_REG}")
+            # Restore saved registers
+            for reg in reversed(used_saved):
+                self._emit_instr(f"POP r{reg}")
         else:
             raise CompilerError(f"Unknown builtin: {op}")
 

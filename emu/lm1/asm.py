@@ -544,9 +544,12 @@ class Assembler:
             tmpl = self._eval_expr(args[2], ln)
             return encode_i(Op.ALLOCV, rd, rs1, tmpl)
         if mn == 'ALLOC.CLOSURE':
+            # ALLOC.CLOSURE rd, rs_code, env_size
+            # Executor: bits 25:21=rd, 20:16=rs_code, 15:11=env_size
             rd = self._reg(args[0], ln)
-            n_words = self._eval_expr(args[1], ln)
-            payload = ((rd & 0x1F) << 21) | ((n_words & 0x1F) << 16)
+            rs_code = self._reg(args[1], ln)
+            env_size = self._eval_expr(args[2], ln)
+            payload = ((rd & 0x1F) << 21) | ((rs_code & 0x1F) << 16) | ((env_size & 0x1F) << 11)
             return encode_x(Op.ALLOC_CLOSURE, payload)
 
         # ---------------------------------------------------------------

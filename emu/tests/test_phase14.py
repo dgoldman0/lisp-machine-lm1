@@ -569,3 +569,91 @@ def test_vector_nested():
     out, _ = _compile_direct(forms)
     # 1 + 4 = 5
     assert out == "5"
+
+
+# ===================================================================
+# Stage 5: Closures
+# ===================================================================
+
+@test("closure_no_capture", batch="phase14_stage5")
+def test_closure_no_capture():
+    """Lambda with no captures — basic ALLOC.CLOSURE + CALL.CLOSURE."""
+    forms = parse("""
+        (defun main ()
+          (funcall (lambda () (print-fixnum 42))))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "42"
+
+
+@test("closure_one_capture", batch="phase14_stage5")
+def test_closure_one_capture():
+    """Lambda capturing one variable from enclosing let."""
+    forms = parse("""
+        (defun main ()
+          (let ((x 10))
+            (funcall (lambda (y) (print-fixnum (+ x y))) 20)))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "30"
+
+
+@test("closure_returned", batch="phase14_stage5")
+def test_closure_returned():
+    """Higher-order function returning a closure (make-adder)."""
+    forms = parse("""
+        (defun make-adder (n)
+          (lambda (x) (+ n x)))
+
+        (defun main ()
+          (let ((add5 (make-adder 5)))
+            (print-fixnum (funcall add5 10))))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "15"
+
+
+@test("closure_multi_capture", batch="phase14_stage5")
+def test_closure_multi_capture():
+    """Lambda capturing multiple variables."""
+    forms = parse("""
+        (defun main ()
+          (let* ((a 1) (b 2) (c 3))
+            (print-fixnum
+              (funcall (lambda (x) (+ x (+ a (+ b c)))) 4))))
+    """)
+    out, _ = _compile_direct(forms)
+    # 4 + 1 + 2 + 3 = 10
+    assert out == "10"
+
+
+@test("closure_as_argument", batch="phase14_stage5")
+def test_closure_as_argument():
+    """Pass a closure as argument to another function."""
+    forms = parse("""
+        (defun apply-fn (f x)
+          (funcall f x))
+
+        (defun main ()
+          (let ((n 100))
+            (print-fixnum (apply-fn (lambda (x) (+ n x)) 42))))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "142"
+
+
+@test("closure_multi_instances", batch="phase14_stage5")
+def test_closure_multi_instances():
+    """Multiple closures from same function with different captures."""
+    forms = parse("""
+        (defun make-adder (n)
+          (lambda (x) (+ n x)))
+
+        (defun main ()
+          (let* ((add3 (make-adder 3))
+                 (add7 (make-adder 7)))
+            (print-fixnum (funcall add3 10))
+            (print-fixnum (funcall add7 10))))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "1317"
