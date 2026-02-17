@@ -151,6 +151,7 @@ class Compiler:
         self._functions: dict[str, str] = {}  # func_name → asm_label
         self._builtins: set[str] = set()
         self._inline_builtins: dict[str, str] = {}  # name → handler method name
+        self._current_fn_saved_regs: list[int] = []  # callee-saved regs pushed by current defun
 
         # Register inline builtins
         for name in ('car', 'cdr', 'cons', '+', '-', '*', '/', 'eq',
@@ -164,6 +165,11 @@ class Compiler:
     def _label(self, prefix: str = "L") -> str:
         self._label_counter += 1
         return f"__{prefix}_{self._label_counter}"
+
+    @staticmethod
+    def _sanitize_label(name: str) -> str:
+        """Sanitize a symbol name for use as an assembly label."""
+        return name.replace('-', '_').replace('?', '_p').replace('!', '_bang')
 
     def _emit(self, line: str) -> None:
         self.lines.append(line)
@@ -237,7 +243,7 @@ class Compiler:
         params = form[2]
         body = form[3:]
 
-        fn_label = f"_fn_{name}"
+        fn_label = f"_fn_{self._sanitize_label(name)}"
         self._functions[name] = fn_label
 
         self._emit_comment(f"defun {name}")
@@ -262,10 +268,16 @@ class Compiler:
             self._emit_instr(f"MOV r{save_reg}, r{self.ARG_REGS[i]}")
             env[param] = save_reg
 
-        # Compile body forms (result of last goes to r1)
+        # Track saved regs for tail-call optimization
+        self._current_fn_saved_regs = list(used_saved)
+
+        # Compile body forms (result of last goes to r1, in tail position)
         for i, expr in enumerate(body):
-            dest = self.RET_REG if i == len(body) - 1 else self.SCRATCH_REGS[0]
-            self._compile_expr(expr, env, dest=dest)
+            is_last = (i == len(body) - 1)
+            dest = self.RET_REG if is_last else self.SCRATCH_REGS[0]
+            self._compile_expr(expr, env, dest=dest, tail=is_last)
+
+        self._current_fn_saved_regs = []
 
         # Epilogue: restore callee-saved registers and return
         for reg in reversed(used_saved):
@@ -288,7 +300,7 @@ class Compiler:
     # Expression compilation
     # ------------------------------------------------------------------
 
-    def _compile_expr(self, expr, env: dict, dest: int = 1) -> None:
+    def _compile_expr(self, expr, env: dict, dest: int = 1, tail: bool = False) -> None:
         """Compile an expression, putting the result in register `dest`."""
         if expr is None:
             self._emit_instr(f"LI r{dest}, 5")  # NIL
@@ -312,7 +324,7 @@ class Compiler:
             if len(expr) == 0:
                 self._emit_instr(f"LI r{dest}, 5")  # NIL = empty list
             else:
-                self._compile_form(expr, env, dest)
+                self._compile_form(expr, env, dest, tail=tail)
         else:
             raise CompilerError(f"Unknown expression type: {type(expr)}: {expr}")
 
@@ -330,7 +342,7 @@ class Compiler:
         else:
             raise CompilerError(f"Undefined variable: {name}")
 
-    def _compile_form(self, form: list, env: dict, dest: int) -> None:
+    def _compile_form(self, form: list, env: dict, dest: int, tail: bool = False) -> None:
         """Compile a compound form (operator + arguments)."""
         op = form[0]
 
@@ -338,15 +350,16 @@ class Compiler:
         if op == 'quote':
             return self._compile_quote(form[1], dest)
         if op == 'if':
-            return self._compile_if(form, env, dest)
+            return self._compile_if(form, env, dest, tail=tail)
         if op == 'cond':
-            return self._compile_cond(form, env, dest)
+            return self._compile_cond(form, env, dest, tail=tail)
         if op == 'let':
-            return self._compile_let(form, env, dest)
+            return self._compile_let(form, env, dest, tail=tail)
         if op == 'progn' or op == 'begin':
             for i, e in enumerate(form[1:]):
-                d = dest if i == len(form) - 2 else self.SCRATCH_REGS[0]
-                self._compile_expr(e, env, dest=d)
+                is_last = (i == len(form) - 2)
+                d = dest if is_last else self.SCRATCH_REGS[0]
+                self._compile_expr(e, env, dest=d, tail=(tail and is_last))
             return
         if op == 'lambda':
             return self._compile_lambda(form, env, dest)
@@ -359,13 +372,13 @@ class Compiler:
         if op == 'while':
             return self._compile_while(form, env, dest)
         if op == 'let*':
-            return self._compile_let_star(form, env, dest)
+            return self._compile_let_star(form, env, dest, tail=tail)
         if op == 'when':
             # (when test body...) → (if test (progn body...) nil)
-            return self._compile_if(['if', form[1], ['progn'] + form[2:]], env, dest)
+            return self._compile_if(['if', form[1], ['progn'] + form[2:]], env, dest, tail=tail)
         if op == 'unless':
             # (unless test body...) → (if test nil (progn body...))
-            return self._compile_if(['if', form[1], None, ['progn'] + form[2:]], env, dest)
+            return self._compile_if(['if', form[1], None, ['progn'] + form[2:]], env, dest, tail=tail)
         if op == 'dotimes':
             return self._compile_dotimes(form, env, dest)
         if op == '__string__':
@@ -375,8 +388,8 @@ class Compiler:
         if isinstance(op, str) and op in self._builtins:
             return self._compile_builtin(op, form[1:], env, dest)
 
-        # Function call
-        self._compile_call(form, env, dest)
+        # Function call — only calls can be tail-optimized
+        self._compile_call(form, env, dest, tail=tail)
 
     # ------------------------------------------------------------------
     # Special forms
@@ -424,7 +437,7 @@ class Compiler:
             self._compile_quote(lst[i], dest=self.SCRATCH_REGS[1])
             self._emit_instr(f"ALLOC.CONS r{dest}, r{self.SCRATCH_REGS[1]}, r{dest}")
 
-    def _compile_if(self, form: list, env: dict, dest: int) -> None:
+    def _compile_if(self, form: list, env: dict, dest: int, tail: bool = False) -> None:
         """(if test then [else])"""
         else_label = self._label("else")
         end_label = self._label("endif")
@@ -433,18 +446,18 @@ class Compiler:
         self._compile_expr(form[1], env, dest=dest)
         # Branch if nil
         self._emit_instr(f"BR.NIL r{dest}, {else_label}")
-        # Then branch
-        self._compile_expr(form[2], env, dest=dest)
+        # Then branch (in tail position if the if itself is)
+        self._compile_expr(form[2], env, dest=dest, tail=tail)
         self._emit_instr(f"BR {end_label}")
         # Else branch
         self._emit_label(else_label)
         if len(form) > 3:
-            self._compile_expr(form[3], env, dest=dest)
+            self._compile_expr(form[3], env, dest=dest, tail=tail)
         else:
             self._emit_instr(f"LI r{dest}, 5")  # nil
         self._emit_label(end_label)
 
-    def _compile_cond(self, form: list, env: dict, dest: int) -> None:
+    def _compile_cond(self, form: list, env: dict, dest: int, tail: bool = False) -> None:
         """(cond (test1 body1...) (test2 body2...) ...)"""
         end_label = self._label("endcond")
         for clause in form[1:]:
@@ -453,23 +466,25 @@ class Compiler:
             if test is True or test == 't':
                 # Default clause
                 for i, e in enumerate(body):
-                    d = dest if i == len(body) - 1 else self.SCRATCH_REGS[0]
-                    self._compile_expr(e, env, dest=d)
+                    is_last = (i == len(body) - 1)
+                    d = dest if is_last else self.SCRATCH_REGS[0]
+                    self._compile_expr(e, env, dest=d, tail=(tail and is_last))
                 self._emit_instr(f"BR {end_label}")
             else:
                 next_label = self._label("cond_next")
                 self._compile_expr(test, env, dest=dest)
                 self._emit_instr(f"BR.NIL r{dest}, {next_label}")
                 for i, e in enumerate(body):
-                    d = dest if i == len(body) - 1 else self.SCRATCH_REGS[0]
-                    self._compile_expr(e, env, dest=d)
+                    is_last = (i == len(body) - 1)
+                    d = dest if is_last else self.SCRATCH_REGS[0]
+                    self._compile_expr(e, env, dest=d, tail=(tail and is_last))
                 self._emit_instr(f"BR {end_label}")
                 self._emit_label(next_label)
         # No clause matched → nil
         self._emit_instr(f"LI r{dest}, 5")
         self._emit_label(end_label)
 
-    def _compile_let(self, form: list, env: dict, dest: int) -> None:
+    def _compile_let(self, form: list, env: dict, dest: int, tail: bool = False) -> None:
         """(let ((var1 val1) (var2 val2) ...) body...)"""
         bindings = form[1]
         body = form[2:]
@@ -484,8 +499,9 @@ class Compiler:
             new_env[var] = reg
 
         for i, e in enumerate(body):
-            d = dest if i == len(body) - 1 else self.SCRATCH_REGS[0]
-            self._compile_expr(e, new_env, dest=d)
+            is_last = (i == len(body) - 1)
+            d = dest if is_last else self.SCRATCH_REGS[0]
+            self._compile_expr(e, new_env, dest=d, tail=(tail and is_last))
 
     def _compile_lambda(self, form: list, env: dict, dest: int) -> None:
         """(lambda (params...) body...)
@@ -575,7 +591,7 @@ class Compiler:
         # while returns nil
         self._emit_instr(f"LI r{dest}, 5")
 
-    def _compile_let_star(self, form: list, env: dict, dest: int) -> None:
+    def _compile_let_star(self, form: list, env: dict, dest: int, tail: bool = False) -> None:
         """(let* ((var1 val1) (var2 val2) ...) body...)
 
         Like let, but each binding is visible to subsequent bindings.
@@ -592,8 +608,9 @@ class Compiler:
             new_env[var] = reg
 
         for i, e in enumerate(body):
-            d = dest if i == len(body) - 1 else self.SCRATCH_REGS[0]
-            self._compile_expr(e, new_env, dest=d)
+            is_last = (i == len(body) - 1)
+            d = dest if is_last else self.SCRATCH_REGS[0]
+            self._compile_expr(e, new_env, dest=d, tail=(tail and is_last))
 
     def _compile_dotimes(self, form: list, env: dict, dest: int) -> None:
         """(dotimes (var count) body...)
@@ -826,54 +843,87 @@ class Compiler:
     # Function calls
     # ------------------------------------------------------------------
 
-    def _compile_call(self, form: list, env: dict, dest: int) -> None:
-        """Compile a function call (func arg1 arg2 ...)."""
+    def _compile_call(self, form: list, env: dict, dest: int, tail: bool = False) -> None:
+        """Compile a function call (func arg1 arg2 ...).
+
+        When tail=True and we're inside a defun, emit TAILCALL.DIRECT
+        instead of CALL.DIRECT — reusing the current stack frame.
+        """
         func_name = form[0]
         args = form[1:]
 
         if len(args) > len(self.ARG_REGS):
             raise CompilerError(f"Too many arguments: {len(args)}")
 
-        # Save any callee-saved registers we're using
-        used_saved = sorted(set(r for r in env.values() if r in self.SAVED_REGS))
-        for reg in used_saved:
-            self._emit_instr(f"PUSH r{reg}")
+        # Can only do tail call if we're inside a defun
+        do_tail = tail and len(self._current_fn_saved_regs) > 0
 
-        # Evaluate arguments onto stack (to avoid clobbering across calls
-        # within argument expressions)
-        for i, arg in enumerate(args):
-            self._compile_expr(arg, env, dest=self.SCRATCH_REGS[0])
-            if i < len(args) - 1:
-                self._emit_instr(f"PUSH r{self.SCRATCH_REGS[0]}")
+        if do_tail:
+            self._emit_comment(f"tailcall {func_name}")
+            # Evaluate arguments (no env save needed — we're leaving this frame)
+            for i, arg in enumerate(args):
+                self._compile_expr(arg, env, dest=self.SCRATCH_REGS[0])
+                if i < len(args) - 1:
+                    self._emit_instr(f"PUSH r{self.SCRATCH_REGS[0]}")
 
-        # Pop args into arg registers (last arg is already in scratch[0])
-        if args:
-            # Last arg → its arg register
-            last_idx = len(args) - 1
-            self._emit_instr(f"MOV r{self.ARG_REGS[last_idx]}, r{self.SCRATCH_REGS[0]}")
-            # Pop remaining in reverse
-            for i in range(last_idx - 1, -1, -1):
-                self._emit_instr(f"POP r{self.ARG_REGS[i]}")
+            # Pop args into arg registers
+            if args:
+                last_idx = len(args) - 1
+                self._emit_instr(f"MOV r{self.ARG_REGS[last_idx]}, r{self.SCRATCH_REGS[0]}")
+                for i in range(last_idx - 1, -1, -1):
+                    self._emit_instr(f"POP r{self.ARG_REGS[i]}")
 
-        # Call the function
-        if isinstance(func_name, str) and func_name in self._functions:
-            fn_label = self._functions[func_name]
-            self._emit_instr(f"CALL.DIRECT {fn_label}")
-        elif isinstance(func_name, str):
-            # Assume forward reference — will be defined later
-            fn_label = f"_fn_{func_name}"
-            self._functions[func_name] = fn_label
-            self._emit_instr(f"CALL.DIRECT {fn_label}")
+            # Restore defun's callee-saved registers before tail jump
+            for reg in reversed(self._current_fn_saved_regs):
+                self._emit_instr(f"POP r{reg}")
+
+            # Resolve function label
+            if isinstance(func_name, str) and func_name in self._functions:
+                fn_label = self._functions[func_name]
+            elif isinstance(func_name, str):
+                fn_label = f"_fn_{self._sanitize_label(func_name)}"
+                self._functions[func_name] = fn_label
+            else:
+                raise CompilerError(f"Cannot call non-symbol: {func_name}")
+
+            self._emit_instr(f"TAILCALL.DIRECT {fn_label}")
         else:
-            raise CompilerError(f"Cannot call non-symbol: {func_name}")
+            # Normal call — save env registers around the call
+            used_saved = sorted(set(r for r in env.values() if r in self.SAVED_REGS))
+            for reg in used_saved:
+                self._emit_instr(f"PUSH r{reg}")
 
-        # Move result to dest if needed
-        if dest != self.RET_REG:
-            self._emit_instr(f"MOV r{dest}, r{self.RET_REG}")
+            # Evaluate arguments onto stack
+            for i, arg in enumerate(args):
+                self._compile_expr(arg, env, dest=self.SCRATCH_REGS[0])
+                if i < len(args) - 1:
+                    self._emit_instr(f"PUSH r{self.SCRATCH_REGS[0]}")
 
-        # Restore saved registers
-        for reg in reversed(used_saved):
-            self._emit_instr(f"POP r{reg}")
+            # Pop args into arg registers
+            if args:
+                last_idx = len(args) - 1
+                self._emit_instr(f"MOV r{self.ARG_REGS[last_idx]}, r{self.SCRATCH_REGS[0]}")
+                for i in range(last_idx - 1, -1, -1):
+                    self._emit_instr(f"POP r{self.ARG_REGS[i]}")
+
+            # Resolve function label
+            if isinstance(func_name, str) and func_name in self._functions:
+                fn_label = self._functions[func_name]
+            elif isinstance(func_name, str):
+                fn_label = f"_fn_{self._sanitize_label(func_name)}"
+                self._functions[func_name] = fn_label
+            else:
+                raise CompilerError(f"Cannot call non-symbol: {func_name}")
+
+            self._emit_instr(f"CALL.DIRECT {fn_label}")
+
+            # Move result to dest if needed
+            if dest != self.RET_REG:
+                self._emit_instr(f"MOV r{dest}, r{self.RET_REG}")
+
+            # Restore saved registers
+            for reg in reversed(used_saved):
+                self._emit_instr(f"POP r{reg}")
 
     # ------------------------------------------------------------------
     # Helpers
@@ -917,7 +967,7 @@ class Compiler:
         if main_fn in self._functions:
             self._emit_instr(f"CALL.DIRECT {self._functions[main_fn]}")
         else:
-            self._emit_instr(f"CALL.DIRECT _fn_{main_fn}")
+            self._emit_instr(f"CALL.DIRECT _fn_{self._sanitize_label(main_fn)}")
         self._emit_instr("HALT")
         self._emit("")
 

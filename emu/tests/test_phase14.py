@@ -261,3 +261,162 @@ def test_compiler_parse_comments():
     assert len(forms) == 2
     assert forms[0] == 42
     assert forms[1] == ['+', 1, 2]
+
+
+# ===================================================================
+# Stage 2: Tail-call optimization
+# ===================================================================
+
+@test("tco_asm_output", batch="phase14_stage2")
+def test_tco_asm_output():
+    """Tail calls emit TAILCALL.DIRECT instead of CALL.DIRECT."""
+    forms = parse("""
+        (defun foo (n)
+          (bar n))
+        (defun bar (n) n)
+        (defun main () (foo 1))
+    """)
+    cc = Compiler()
+    cc.compile_toplevel(forms)
+    src = cc.get_output()
+    # foo should use TAILCALL.DIRECT to call bar (it's the last expr)
+    assert "TAILCALL.DIRECT _fn_bar" in src
+    # foo should NOT have CALL.DIRECT for bar
+    lines = src.split('\n')
+    in_foo = False
+    for line in lines:
+        if '_fn_foo:' in line:
+            in_foo = True
+        elif in_foo and ':' in line and not line.startswith(' '):
+            break  # left foo
+        elif in_foo and 'CALL.DIRECT _fn_bar' in line and 'TAILCALL' not in line:
+            assert False, "foo should use TAILCALL.DIRECT, not CALL.DIRECT for bar"
+
+
+@test("tco_asm_non_tail", batch="phase14_stage2")
+def test_tco_asm_non_tail():
+    """Non-tail calls still use CALL.DIRECT."""
+    forms = parse("""
+        (defun foo (n)
+          (bar n)
+          (+ n 1))
+        (defun bar (n) n)
+        (defun main () (foo 1))
+    """)
+    cc = Compiler()
+    cc.compile_toplevel(forms)
+    src = cc.get_output()
+    # foo calls bar NOT in tail position, so CALL.DIRECT
+    assert "CALL.DIRECT _fn_bar" in src
+    # No TAILCALL in foo for bar
+    lines = src.split('\n')
+    in_foo = False
+    for line in lines:
+        if '_fn_foo:' in line:
+            in_foo = True
+        elif in_foo and ':' in line and not line.startswith(' '):
+            break
+        elif in_foo and 'TAILCALL' in line:
+            assert False, "bar call in foo is not tail — should not use TAILCALL"
+
+
+@test("tco_self_recursive", batch="phase14_stage2")
+def test_tco_self_recursive():
+    """Self-recursive tail call counts down from 10000 without stack overflow."""
+    forms = parse("""
+        (defun countdown (n)
+          (if (= n 0)
+            (print-fixnum 0)
+            (countdown (- n 1))))
+        (defun main () (countdown 5000))
+    """)
+    out, _ = _compile_direct(forms, max_instructions=5_000_000)
+    assert _last_line(out) == "0"
+
+
+@test("tco_tail_in_if", batch="phase14_stage2")
+def test_tco_tail_in_if():
+    """Tail call through if branches — mutual recursion."""
+    forms = parse("""
+        (defun is-even (n)
+          (if (= n 0)
+            1
+            (is-odd (- n 1))))
+        (defun is-odd (n)
+          (if (= n 0)
+            0
+            (is-even (- n 1))))
+        (defun main ()
+          (print-fixnum (is-even 100))
+          (print-fixnum (is-odd 100)))
+    """)
+    out, _ = _compile_direct(forms, max_instructions=1_000_000)
+    # is-even(100) = 1, is-odd(100) = 0
+    assert out == "10"
+
+
+@test("tco_tail_in_cond", batch="phase14_stage2")
+def test_tco_tail_in_cond():
+    """Tail call through cond works correctly."""
+    forms = parse("""
+        (defun classify (n)
+          (cond
+            ((= n 0) (print-fixnum 0))
+            ((= n 1) (print-fixnum 1))
+            (t       (print-fixnum 9))))
+        (defun main ()
+          (classify 0)
+          (classify 1)
+          (classify 42))
+    """)
+    out, _ = _compile_direct(forms)
+    # classify(0)→0, classify(1)→1, classify(42)→9
+    assert out == "019"
+
+
+@test("tco_tail_in_let", batch="phase14_stage2")
+def test_tco_tail_in_let():
+    """Tail call through let body works correctly."""
+    forms = parse("""
+        (defun double-add (a b)
+          (let ((sum (+ a b)))
+            (do-print sum)))
+        (defun do-print (x)
+          (print-fixnum x))
+        (defun main ()
+          (double-add 10 20))
+    """)
+    out, _ = _compile_direct(forms)
+    assert _last_line(out) == "30"
+
+
+@test("tco_tail_in_progn", batch="phase14_stage2")
+def test_tco_tail_in_progn():
+    """Last expression in progn is in tail position."""
+    forms = parse("""
+        (defun foo (n)
+          (progn
+            (print-fixnum 1)
+            (bar n)))
+        (defun bar (n)
+          (print-fixnum n))
+        (defun main () (foo 42))
+    """)
+    out, _ = _compile_direct(forms)
+    # print-fixnum doesn't add newlines: "1" then "42" = "142"
+    assert out == "142"
+
+
+@test("tco_factorial_accum", batch="phase14_stage2")
+def test_tco_factorial_accum():
+    """Tail-recursive factorial with accumulator."""
+    forms = parse("""
+        (defun fact-iter (n acc)
+          (if (= n 0)
+            acc
+            (fact-iter (- n 1) (* n acc))))
+        (defun main ()
+          (print-fixnum (fact-iter 10 1)))
+    """)
+    out, _ = _compile_direct(forms, max_instructions=500_000)
+    assert _last_line(out) == "3628800"
