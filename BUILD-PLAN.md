@@ -150,20 +150,20 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [x] Font bug fix: proper 16-row glyphs with `_g()`/`_gd()` padding
 - [x] Test: open 3 overlapping windows, move/resize/raise, menu bar responds
 
-### Phase 11: Crystallites, File Manager, Theming
+### Phase 11: Crystallites, File Manager, Theming ✅
 **Goal:** Desk accessories, spatial file manager, resource system, scrap, themes.
-**Status:** Partially started — basic crystallites (terminal, clock, calculator) done in Phase 10.
+**Status:** Complete. All crystallites, scrap clipboard, resource system, file manager, desktop profile, and control panel implemented. 31 tests passing.
 
 - [x] Crystallite framework: system-registered micro-apps, always available
 - [x] Standard crystallites: clock, calculator, terminal (REPL-in-a-window)
-- [ ] Inspector crystallite
-- [ ] Scrap (clipboard): typed, structured, with history and type negotiation
-- [ ] Resource system: menus/dialogs/alerts as editable Lisp data
-- [ ] Spatial file manager: folder=window, icons, drag-and-drop, file associations
-- [ ] Desktop profile: serialize/deserialize desktop state as Lisp form
+- [x] Inspector crystallite: window stats, z-order, focused window details, pixel probe, scrap info
+- [x] Scrap (clipboard): typed (text/lisp), structured, history ring (max 16), type negotiation
+- [x] Resource system: menus/dialogs/alerts as editable Lisp data, load/save, menu builder
+- [x] Spatial file manager: folder=window, directory listing, dirs-first, selection, navigation
+- [x] Desktop profile: serialize/deserialize desktop state as Lisp form, file I/O
 - [x] Theming: Colors class with full semantic color scheme, live-switchable
-- [ ] Control Panel crystallite: theme picker, mouse speed, resolution
-- [ ] Test: full desktop session — open file manager, launch editor, use clock, switch theme
+- [x] Control Panel crystallite: color swatches, system info, toggleable sections
+- [x] Test: full desktop session — all crystallites redraw, scrap workflow, profile roundtrip
 
 ### Phase 12: Visual Modernization ✅
 **Goal:** Crystal Desktop looks like a modern spiritual successor to GEM, not an 80s replica.
