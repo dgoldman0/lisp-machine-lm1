@@ -398,6 +398,51 @@ class VDI:
                     self.fb[sy * self.width + sx] = alpha_blend(shadow_color, bg, alpha)
         self._dirty = True
 
+    def fill_circle(self, cx: int, cy: int, r: int, color: int) -> None:
+        """Draw a filled circle (Midpoint algorithm)."""
+        color = color & 0xFFFFFF
+        fb = self.fb
+        w = self.width
+        h = self.height
+        for dy in range(-r, r + 1):
+            py = cy + dy
+            if py < 0 or py >= h:
+                continue
+            dx_max = int((r * r - dy * dy) ** 0.5)
+            x_start = max(0, cx - dx_max)
+            x_end = min(w, cx + dx_max + 1)
+            base = py * w
+            for px in range(x_start, x_end):
+                fb[base + px] = color
+        self._dirty = True
+
+    def rounded_rect(self, x: int, y: int, w: int, h: int,
+                     r: int, color: int) -> None:
+        """Draw a filled rounded rectangle."""
+        color = color & 0xFFFFFF
+        fb = self.fb
+        sw = self.width
+        sh = self.height
+        r = min(r, w // 2, h // 2)
+        for dy in range(h):
+            py = y + dy
+            if py < 0 or py >= sh:
+                continue
+            # Determine row inset for rounded corners
+            inset = 0
+            if dy < r:
+                dist = r - dy
+                inset = r - int((r * r - dist * dist) ** 0.5)
+            elif dy >= h - r:
+                dist = dy - (h - 1 - r)
+                inset = r - int((r * r - dist * dist) ** 0.5)
+            x_start = max(0, x + inset)
+            x_end = min(sw, x + w - inset)
+            base = py * sw
+            for px in range(x_start, x_end):
+                fb[base + px] = color
+        self._dirty = True
+
     def read_pixel(self, x: int, y: int) -> int:
         """Read a single pixel's RGB color (0xRRGGBB)."""
         if 0 <= x < self.width and 0 <= y < self.height:
@@ -541,12 +586,17 @@ class VDI:
             return
         import pygame
 
-        # Write RGB directly to surface
-        for y in range(self.height):
-            for x in range(self.width):
-                c = self.fb[y * self.width + x]
-                self._surface.set_at((x, y),
-                    ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF))
+        # Bulk convert framebuffer → RGB byte buffer for pygame
+        fb = self.fb
+        n = self.width * self.height
+        buf = bytearray(n * 3)
+        for i in range(n):
+            c = fb[i]
+            j = i * 3
+            buf[j]     = (c >> 16) & 0xFF
+            buf[j + 1] = (c >> 8) & 0xFF
+            buf[j + 2] = c & 0xFF
+        surf = pygame.image.frombuffer(bytes(buf), (self.width, self.height), 'RGB')
 
         # Draw cursor overlay
         if self.cursor_visible:
@@ -556,15 +606,15 @@ class VDI:
                     px, py = cx + dx, cy + dy
                     if 0 <= px < self.width and 0 <= py < self.height:
                         if dx <= dy and dx < 8:
-                            r, g, b, _ = self._surface.get_at((px, py))
-                            self._surface.set_at((px, py), (r ^ 255, g ^ 255, b ^ 255))
+                            r, g, b, _ = surf.get_at((px, py))
+                            surf.set_at((px, py), (r ^ 255, g ^ 255, b ^ 255))
 
         # Scale and blit
         if self.scale == 1:
-            self._screen.blit(self._surface, (0, 0))
+            self._screen.blit(surf, (0, 0))
         else:
             scaled = pygame.transform.scale(
-                self._surface,
+                surf,
                 (self.width * self.scale, self.height * self.scale))
             self._screen.blit(scaled, (0, 0))
         pygame.display.flip()

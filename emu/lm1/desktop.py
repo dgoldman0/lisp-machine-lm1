@@ -29,35 +29,72 @@ from .vdi import (
 # ===================================================================
 
 class Colors:
-    """0xRRGGBB color constants for the desktop theme."""
-    BLACK       = 0x000000
-    WHITE       = 0xFFFFFF
-    LIGHT_GRAY  = 0xC0C0C0
-    DARK_GRAY   = 0x606060
-    BLUE        = 0x2060A0
-    CYAN        = 0x00AAAA
-    GREEN       = 0x00CC44
-    RED         = 0xCC2222
-    YELLOW      = 0xEECC00
-    MAGENTA     = 0xAA00AA
+    """0xRRGGBB color constants — retro-futuristic Crystal Desktop theme."""
+    BLACK       = 0x1A1A2E
+    WHITE       = 0xF0F0F5
+    LIGHT_GRAY  = 0xC8C8D0
+    MID_GRAY    = 0x888898
+    DARK_GRAY   = 0x505068
 
-    # Semantic colors
-    DESKTOP_BG           = 0x206060   # teal-blue (GEM-inspired)
-    DESKTOP_ACCENT       = 0x287070   # slightly lighter for crosshatch
-    TITLE_BAR_ACTIVE     = 0x2255BB   # deeper blue
-    TITLE_BAR_ACTIVE_END = 0x104488   # gradient end for active title
-    TITLE_BAR_INACTIVE   = 0x808080   # gray
-    TITLE_TEXT            = 0xFFFFFF   # white
-    WINDOW_BG            = 0xFFFFFF   # white
-    WINDOW_BORDER        = 0x000000   # black
-    MENU_BAR_BG          = 0xE0E0E0   # light gray
-    MENU_BAR_TEXT         = 0x000000   # black
-    MENU_HIGHLIGHT       = 0x2255BB   # bright blue
-    MENU_HI_TEXT          = 0xFFFFFF   # white
-    BUTTON_BG            = 0xC0C0C0   # light gray
-    BUTTON_TEXT           = 0x000000   # black
-    SCROLLBAR_BG         = 0xC0C0C0   # light gray
-    SCROLLBAR_FG         = 0x808080   # dark gray
+    # Accent palette
+    BLUE        = 0x3A7BD5
+    CYAN        = 0x00D2FF
+    GREEN       = 0x00E676
+    RED         = 0xE53935
+    YELLOW      = 0xFFD740
+    MAGENTA     = 0xD500F9
+
+    # Desktop background gradient
+    DESKTOP_BG           = 0x0F1B2D   # deep navy
+    DESKTOP_BG_END       = 0x1A2744   # slightly lighter navy at bottom
+
+    # Title bars
+    TITLE_BAR_ACTIVE     = 0x3A7BD5   # bright blue
+    TITLE_BAR_ACTIVE_END = 0x1E4B8C   # deeper blue gradient end
+    TITLE_BAR_INACTIVE   = 0x3A3A50   # muted dark
+    TITLE_BAR_INACTIVE_END = 0x2A2A3E
+    TITLE_TEXT            = 0xFFFFFF
+    TITLE_TEXT_SHADOW     = 0x0A0A20   # dark shadow behind title
+
+    # Window
+    WINDOW_BG            = 0xF8F8FC
+    WINDOW_BORDER        = 0x3A3A50   # soft dark border, not black
+
+    # Close button
+    CLOSE_BTN_BG         = 0xE53935   # red
+    CLOSE_BTN_BG_ALT     = 0xC62828   # darker red for gradient
+    CLOSE_BTN_X          = 0xFFFFFF   # white ×
+
+    # Menu bar
+    MENU_BAR_BG          = 0x1C2840   # dark navy to match desktop
+    MENU_BAR_BG_END      = 0x243352
+    MENU_BAR_TEXT         = 0xC8D0E0   # light cool gray
+    MENU_BAR_SEPARATOR   = 0x3A4A66   # subtle line
+    MENU_HIGHLIGHT       = 0x3A7BD5
+    MENU_HI_TEXT          = 0xFFFFFF
+
+    # Dropdown menus
+    DROPDOWN_BG          = 0x1E2A44
+    DROPDOWN_BORDER      = 0x3A4A66
+    DROPDOWN_TEXT         = 0xD0D8E8
+    DROPDOWN_SEPARATOR   = 0x2A3A56
+
+    # Buttons/widgets
+    BUTTON_BG            = 0x2A3450
+    BUTTON_BG_END        = 0x1E2840
+    BUTTON_BORDER        = 0x4A5A78
+    BUTTON_TEXT           = 0xD0D8E8
+
+    # Scrollbar
+    SCROLLBAR_BG         = 0x1A2540
+    SCROLLBAR_FG         = 0x3A4A66
+
+    # Shadows
+    SHADOW_COLOR         = 0x000000
+    SHADOW_ALPHA         = 90
+
+    # Resize grip
+    GRIP_DOT             = 0x4A5A78
 
 
 # ===================================================================
@@ -272,14 +309,17 @@ class AES:
         """Redraw the entire desktop."""
         vdi = self.vdi
 
-        # 1. Desktop background with subtle crosshatch
-        vdi.fill_rect(0, 0, vdi.width, vdi.height, Colors.DESKTOP_BG)
-        for py in range(0, vdi.height, 8):
-            for px in range(0, vdi.width, 8):
-                if 0 <= px < vdi.width and 0 <= py < vdi.height:
-                    vdi.fb[py * vdi.width + px] = Colors.DESKTOP_ACCENT
+        # 1. Desktop background — smooth vertical gradient
+        vdi.grad_rect(0, 0, vdi.width, vdi.height,
+                       Colors.DESKTOP_BG, Colors.DESKTOP_BG_END,
+                       GRAD_VERTICAL)
 
-        # 2. Windows (bottom to top)
+        # 2. Windows (bottom to top) — draw shadows first, then windows
+        for win in self._windows:
+            if win.visible:
+                vdi.shadow_rect(win.x, win.y, win.w, win.h,
+                                 radius=6, alpha=Colors.SHADOW_ALPHA)
+
         for win in self._windows:
             if win.visible:
                 self._draw_window(win)
@@ -295,48 +335,48 @@ class AES:
         self._dirty = False
 
     def _draw_window(self, win: Window) -> None:
-        """Draw a single window with decorations."""
+        """Draw a single window with modern retro-futuristic decorations."""
         vdi = self.vdi
         is_active = (win is self._focused)
 
-        # Outer border
+        # Outer border (soft dark, not hard black)
         vdi.fill_rect(win.x, win.y, win.w, win.h, Colors.WINDOW_BORDER)
 
-        # Title bar background
+        # Title bar background — gradient
         if is_active:
             vdi.grad_rect(win.x + 1, win.y + 1,
                           win.w - 2, TITLE_BAR_H - 1,
                           Colors.TITLE_BAR_ACTIVE,
                           Colors.TITLE_BAR_ACTIVE_END,
                           GRAD_VERTICAL)
-            title_bg = Colors.TITLE_BAR_ACTIVE
         else:
-            vdi.fill_rect(win.x + 1, win.y + 1,
-                          win.w - 2, TITLE_BAR_H - 1, Colors.TITLE_BAR_INACTIVE)
-            title_bg = Colors.TITLE_BAR_INACTIVE
+            vdi.grad_rect(win.x + 1, win.y + 1,
+                          win.w - 2, TITLE_BAR_H - 1,
+                          Colors.TITLE_BAR_INACTIVE,
+                          Colors.TITLE_BAR_INACTIVE_END,
+                          GRAD_VERTICAL)
 
-        # Close button (if closeable)
+        # Close button — red circle with white ×
         if win.flags & WIN_CLOSEABLE:
-            bx = win.x + 3
-            by = win.y + 2
-            vdi.fill_rect(bx, by, CLOSE_BTN_W, CLOSE_BTN_H, Colors.BUTTON_BG)
-            vdi.draw_line(bx, by, bx + CLOSE_BTN_W - 1, by, Colors.WHITE)
-            vdi.draw_line(bx, by, bx, by + CLOSE_BTN_H - 1, Colors.WHITE)
-            vdi.draw_line(bx + CLOSE_BTN_W - 1, by,
-                           bx + CLOSE_BTN_W - 1, by + CLOSE_BTN_H - 1, Colors.BLACK)
-            vdi.draw_line(bx, by + CLOSE_BTN_H - 1,
-                           bx + CLOSE_BTN_W - 1, by + CLOSE_BTN_H - 1, Colors.BLACK)
-            # X mark inside
-            vdi.draw_line(bx + 3, by + 3, bx + CLOSE_BTN_W - 4, by + CLOSE_BTN_H - 4,
-                           Colors.BLACK)
-            vdi.draw_line(bx + CLOSE_BTN_W - 4, by + 3, bx + 3, by + CLOSE_BTN_H - 4,
-                           Colors.BLACK)
+            btn_cx = win.x + 3 + CLOSE_BTN_W // 2
+            btn_cy = win.y + 2 + CLOSE_BTN_H // 2
+            btn_r = min(CLOSE_BTN_W, CLOSE_BTN_H) // 2 - 1
+            vdi.fill_circle(btn_cx, btn_cy, btn_r, Colors.CLOSE_BTN_BG)
+            # White × mark
+            xr = btn_r - 3
+            vdi.draw_line(btn_cx - xr, btn_cy - xr,
+                           btn_cx + xr, btn_cy + xr, Colors.CLOSE_BTN_X)
+            vdi.draw_line(btn_cx + xr, btn_cy - xr,
+                           btn_cx - xr, btn_cy + xr, Colors.CLOSE_BTN_X)
 
-        # Title text (centered horizontally, vertically centered in title bar)
+        # Title text with drop shadow
         cw_f = vdi.font.char_w
         ch_f = vdi.font.char_h
         text_x = win.x + (win.w - len(win.title) * cw_f) // 2
         text_y = win.y + (TITLE_BAR_H - ch_f) // 2
+        # Shadow first (1px offset down-right)
+        vdi.draw_string(text_x + 1, text_y + 1, win.title,
+                        Colors.TITLE_TEXT_SHADOW, BG_TRANSPARENT)
         vdi.draw_string(text_x, text_y, win.title,
                         Colors.TITLE_TEXT, BG_TRANSPARENT)
 
@@ -344,32 +384,44 @@ class AES:
         cx, cy, cw, ch = win.client_rect()
         vdi.fill_rect(cx, cy, cw, ch, Colors.WINDOW_BG)
 
-        # 3D border effect (light top-left, dark bottom-right)
-        # Top edge highlight
+        # Subtle separator line between title bar and content
         vdi.draw_line(win.x + 1, win.y + TITLE_BAR_H,
-                       win.x + win.w - 2, win.y + TITLE_BAR_H, Colors.DARK_GRAY)
+                       win.x + win.w - 2, win.y + TITLE_BAR_H,
+                       Colors.WINDOW_BORDER)
 
-        # Resize grip (if resizable)
+        # Resize grip — dot pattern (bottom-right corner)
         if win.flags & WIN_RESIZABLE:
             gx = win.x + win.w - GRIP_SIZE
             gy = win.y + win.h - GRIP_SIZE
-            for i in range(0, GRIP_SIZE - 2, 3):
-                vdi.draw_line(gx + i, gy + GRIP_SIZE - 2,
-                               gx + GRIP_SIZE - 2, gy + i, Colors.DARK_GRAY)
+            for row in range(3):
+                for col in range(3 - row):
+                    dx = GRIP_SIZE - 4 - col * 4
+                    dy = GRIP_SIZE - 4 - row * 4
+                    px, py = gx + dx, gy + dy
+                    if 0 <= px < vdi.width and 0 <= py < vdi.height:
+                        vdi.fb[py * vdi.width + px] = Colors.GRIP_DOT
+                    if 0 <= px + 1 < vdi.width and 0 <= py < vdi.height:
+                        vdi.fb[py * vdi.width + px + 1] = Colors.GRIP_DOT
+                    if 0 <= px < vdi.width and 0 <= py + 1 < vdi.height:
+                        vdi.fb[(py + 1) * vdi.width + px] = Colors.GRIP_DOT
+                    if 0 <= px + 1 < vdi.width and 0 <= py + 1 < vdi.height:
+                        vdi.fb[(py + 1) * vdi.width + px + 1] = Colors.GRIP_DOT
 
         # Draw window content
         if win.on_redraw:
             win.on_redraw(vdi, win)
 
     def _draw_menu_bar(self) -> None:
-        """Draw the global menu bar at the top of the screen."""
+        """Draw the global menu bar — dark, modern."""
         vdi = self.vdi
 
-        # Menu bar background
-        vdi.fill_rect(0, 0, vdi.width, MENU_BAR_H, Colors.MENU_BAR_BG)
-        # Bottom line
+        # Menu bar gradient background
+        vdi.grad_rect(0, 0, vdi.width, MENU_BAR_H,
+                       Colors.MENU_BAR_BG, Colors.MENU_BAR_BG_END,
+                       GRAD_VERTICAL)
+        # Subtle bottom separator
         vdi.draw_line(0, MENU_BAR_H - 1, vdi.width - 1, MENU_BAR_H - 1,
-                       Colors.BLACK)
+                       Colors.MENU_BAR_SEPARATOR)
 
         # Draw menu labels
         x = 8
@@ -379,13 +431,13 @@ class AES:
         for i, menu in enumerate(menus):
             label_w = len(menu.label) * cw_f + 12
             if i == self._menu_open:
-                vdi.fill_rect(x - 4, 0, label_w, MENU_BAR_H - 1,
+                vdi.fill_rect(x - 4, 1, label_w, MENU_BAR_H - 2,
                                Colors.MENU_HIGHLIGHT)
                 vdi.draw_string(x, (MENU_BAR_H - ch_f) // 2, menu.label,
                                  Colors.MENU_HI_TEXT, Colors.MENU_HIGHLIGHT)
             else:
                 vdi.draw_string(x, (MENU_BAR_H - ch_f) // 2, menu.label,
-                                 Colors.MENU_BAR_TEXT, Colors.MENU_BAR_BG)
+                                 Colors.MENU_BAR_TEXT, BG_TRANSPARENT)
             x += label_w
 
     def _draw_dropdown(self) -> None:
@@ -416,26 +468,29 @@ class AES:
         drop_x = x - 4
         drop_y = MENU_BAR_H
 
-        # Background and border
-        vdi.fill_rect(drop_x, drop_y, drop_w, drop_h, Colors.WHITE)
-        vdi.draw_line(drop_x, drop_y, drop_x + drop_w - 1, drop_y, Colors.BLACK)
-        vdi.draw_line(drop_x, drop_y, drop_x, drop_y + drop_h - 1, Colors.BLACK)
+        # Background and border — dark dropdown
+        vdi.shadow_rect(drop_x, drop_y, drop_w, drop_h,
+                         radius=4, alpha=60)
+        vdi.fill_rect(drop_x, drop_y, drop_w, drop_h, Colors.DROPDOWN_BG)
+        # Border
+        vdi.draw_line(drop_x, drop_y, drop_x + drop_w - 1, drop_y,
+                       Colors.DROPDOWN_BORDER)
+        vdi.draw_line(drop_x, drop_y, drop_x, drop_y + drop_h - 1,
+                       Colors.DROPDOWN_BORDER)
         vdi.draw_line(drop_x + drop_w - 1, drop_y,
-                       drop_x + drop_w - 1, drop_y + drop_h - 1, Colors.BLACK)
+                       drop_x + drop_w - 1, drop_y + drop_h - 1,
+                       Colors.DROPDOWN_BORDER)
         vdi.draw_line(drop_x, drop_y + drop_h - 1,
-                       drop_x + drop_w - 1, drop_y + drop_h - 1, Colors.BLACK)
-        # Shadow
-        vdi.draw_line(drop_x + drop_w, drop_y + 2,
-                       drop_x + drop_w, drop_y + drop_h, Colors.DARK_GRAY)
-        vdi.draw_line(drop_x + 2, drop_y + drop_h,
-                       drop_x + drop_w, drop_y + drop_h, Colors.DARK_GRAY)
+                       drop_x + drop_w - 1, drop_y + drop_h - 1,
+                       Colors.DROPDOWN_BORDER)
 
         # Items
         iy = drop_y + 2
         for idx, item in enumerate(menu.items):
             if item.separator:
-                vdi.draw_line(drop_x + 2, iy + 3,
-                               drop_x + drop_w - 3, iy + 3, Colors.DARK_GRAY)
+                vdi.draw_line(drop_x + 4, iy + 3,
+                               drop_x + drop_w - 5, iy + 3,
+                               Colors.DROPDOWN_SEPARATOR)
                 iy += 8
             else:
                 if idx == self._menu_highlight:
@@ -444,9 +499,9 @@ class AES:
                     vdi.draw_string(drop_x + 8, iy + 2, item.label,
                                      Colors.MENU_HI_TEXT, Colors.MENU_HIGHLIGHT)
                 else:
-                    fg = Colors.MENU_BAR_TEXT if item.enabled else Colors.DARK_GRAY
+                    fg = Colors.DROPDOWN_TEXT if item.enabled else Colors.DARK_GRAY
                     vdi.draw_string(drop_x + 8, iy + 2, item.label,
-                                     fg, Colors.WHITE)
+                                     fg, Colors.DROPDOWN_BG)
                 iy += ch_f + 4
 
     def _get_active_menus(self) -> list[Menu]:
@@ -661,6 +716,8 @@ class AES:
             cx, cy, cw, ch = win.client_rect()
             cw_f = vdi.font.char_w
             ch_f = vdi.font.char_h
+            # Dark background for about
+            vdi.fill_rect(cx, cy, cw, ch, Colors.DROPDOWN_BG)
             lines = [
                 "Crystal Desktop v1.0",
                 "",
@@ -672,7 +729,8 @@ class AES:
             for i, line in enumerate(lines):
                 tx = cx + (cw - len(line) * cw_f) // 2
                 ty = cy + 8 + i * (ch_f + 2)
-                vdi.draw_string(tx, ty, line, Colors.BLACK, Colors.WHITE)
+                fg = Colors.CYAN if i == 0 else Colors.DROPDOWN_TEXT
+                vdi.draw_string(tx, ty, line, fg, Colors.DROPDOWN_BG)
 
         win = self.create_window("About", x, y, w, h,
                                   flags=WIN_CLOSEABLE | WIN_MOVEABLE,
@@ -946,16 +1004,16 @@ class ClockCrystallite:
         cx, cy, cw, ch = win.client_rect()
         cw_f = vdi.font.char_w
         ch_f = vdi.font.char_h
-        vdi.fill_rect(cx, cy, cw, ch, Colors.BLACK)
+        vdi.fill_rect(cx, cy, cw, ch, Colors.DROPDOWN_BG)
         time_str = time.strftime("%H:%M:%S")
         date_str = time.strftime("%Y-%m-%d")
         # Big time display
         tx = cx + (cw - len(time_str) * cw_f) // 2
-        vdi.draw_string(tx, cy + 4, time_str, Colors.GREEN, Colors.BLACK)
+        vdi.draw_string(tx, cy + 4, time_str, Colors.CYAN, Colors.DROPDOWN_BG)
         # Date below
         dx = cx + (cw - len(date_str) * cw_f) // 2
         vdi.draw_string(dx, cy + 4 + ch_f + 2, date_str,
-                         Colors.CYAN, Colors.BLACK)
+                         Colors.DROPDOWN_TEXT, Colors.DROPDOWN_BG)
         self._last_time = time_str
 
     def tick(self) -> None:
@@ -1007,11 +1065,18 @@ class CalculatorCrystallite:
         cw_f = vdi.font.char_w
         ch_f = vdi.font.char_h
 
-        # Display field
+        # Calculator body background
+        vdi.fill_rect(cx, cy, cw, ch, Colors.DROPDOWN_BG)
+
+        # Display field — dark inset
         vdi.fill_rect(cx + 4, cy + 4, cw - 8, 24, Colors.BLACK)
+        vdi.draw_line(cx + 4, cy + 4, cx + cw - 5, cy + 4,
+                       Colors.DROPDOWN_BORDER)
+        vdi.draw_line(cx + 4, cy + 4, cx + 4, cy + 27,
+                       Colors.DROPDOWN_BORDER)
         display_text = self.display[-cw // cw_f:]
         tx = cx + cw - 6 - len(display_text) * cw_f
-        vdi.draw_string(tx, cy + 5, display_text, Colors.GREEN, Colors.BLACK)
+        vdi.draw_string(tx, cy + 7, display_text, Colors.CYAN, Colors.BLACK)
 
         # Buttons
         btn_w, btn_h, pad = 40, 32, 4
@@ -1020,18 +1085,22 @@ class CalculatorCrystallite:
             for col_idx, label in enumerate(row):
                 bx = cx + pad + col_idx * (btn_w + pad)
                 by = by_start + row_idx * (btn_h + pad)
-                # 3D button
-                vdi.fill_rect(bx, by, btn_w, btn_h, Colors.BUTTON_BG)
-                vdi.draw_line(bx, by, bx + btn_w - 1, by, Colors.WHITE)
-                vdi.draw_line(bx, by, bx, by + btn_h - 1, Colors.WHITE)
+                # Modern flat button with subtle gradient
+                vdi.grad_rect(bx, by, btn_w, btn_h,
+                               Colors.BUTTON_BG, Colors.BUTTON_BG_END,
+                               GRAD_VERTICAL)
+                # Border
+                vdi.draw_line(bx, by, bx + btn_w - 1, by, Colors.BUTTON_BORDER)
+                vdi.draw_line(bx, by, bx, by + btn_h - 1, Colors.BUTTON_BORDER)
                 vdi.draw_line(bx + btn_w - 1, by,
-                               bx + btn_w - 1, by + btn_h - 1, Colors.DARK_GRAY)
+                               bx + btn_w - 1, by + btn_h - 1, Colors.BUTTON_BORDER)
                 vdi.draw_line(bx, by + btn_h - 1,
-                               bx + btn_w - 1, by + btn_h - 1, Colors.DARK_GRAY)
+                               bx + btn_w - 1, by + btn_h - 1, Colors.BUTTON_BORDER)
                 # Label
                 lx = bx + (btn_w - len(label) * cw_f) // 2
                 ly = by + (btn_h - ch_f) // 2
-                vdi.draw_string(lx, ly, label, Colors.BUTTON_TEXT, Colors.BUTTON_BG)
+                vdi.draw_string(lx, ly, label,
+                                 Colors.BUTTON_TEXT, BG_TRANSPARENT)
 
     def _on_click(self, win: Window, cx: int, cy: int, button: int) -> None:
         """Handle click in calculator content area."""

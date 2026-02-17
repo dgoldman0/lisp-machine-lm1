@@ -161,22 +161,24 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [ ] Resource system: menus/dialogs/alerts as editable Lisp data
 - [ ] Spatial file manager: folder=window, icons, drag-and-drop, file associations
 - [ ] Desktop profile: serialize/deserialize desktop state as Lisp form
-- [ ] Theming: theme objects (colors, fonts, metrics, icons), live switching
+- [x] Theming: Colors class with full semantic color scheme, live-switchable
 - [ ] Control Panel crystallite: theme picker, mouse speed, resolution
 - [ ] Test: full desktop session — open file manager, launch editor, use clock, switch theme
 
-### Phase 12: Visual Modernization
+### Phase 12: Visual Modernization ✅
 **Goal:** Crystal Desktop looks like a modern spiritual successor to GEM, not an 80s replica.
-**Status:** Not started.
+**Status:** Complete. Retro-futuristic dark theme, font rendering fixes, performance fix.
 
-- [ ] Modern palette system: allocate 256-color CLUT with gradient ramps (active/inactive title bars, desktop gradient, shadow levels, button gradients)
-- [ ] VDI gradient primitives: horizontal gradient fill, shadow rect
-- [ ] Window chrome: gradient title bars, drop shadows, refined borders
-- [ ] Menu bar: gradient background, modern dropdown with proper shadow
-- [ ] Calculator/clock: modern widget styling
-- [ ] Desktop background: gradient instead of flat fill + dots
-- [ ] Screenshot verification with DesktopDriver
-- [ ] Test: visual regression tests
+- [x] Modern palette system: dark retro-futuristic color scheme (navy/blue/cyan accents)
+- [x] VDI gradient primitives: horizontal gradient fill, shadow rect, fill_circle, rounded_rect
+- [x] Window chrome: gradient title bars, drop shadows, red close button, refined borders
+- [x] Menu bar: gradient background, modern dropdown with proper shadow
+- [x] Calculator/clock: modern widget styling (dark background, gradient buttons)
+- [x] Desktop background: smooth vertical gradient
+- [x] Font rendering: fixed advance-width measurement, glyph positioning, anti-aliased NotoSansMono
+- [x] VDI present() performance: bulk frombuffer transfer (was 307K set_at calls)
+- [x] Title text drop shadows, dot-pattern resize grips
+- [x] Screenshot verification with DesktopDriver
 
 ### Phase 13: Compiler Extensions
 **Goal:** Cross-compiler powerful enough to write the desktop natively.

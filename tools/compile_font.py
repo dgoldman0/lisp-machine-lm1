@@ -56,19 +56,13 @@ def determine_cell_size(font: ImageFont.FreeTypeFont,
     """Determine the monospace cell size for a font.
 
     For monospaced fonts all glyphs share the same advance width.
-    We measure a reference set and take the maximum bounding box.
+    We use getlength() which returns the actual advance width, not the
+    ink bounding box (which varies per glyph and causes wobble).
     """
-    # Measure advance width from a reference character
-    ref_chars = "ABCDMWmw0123456789"
-    widths = set()
-    for ch in ref_chars:
-        bbox = font.getbbox(ch)
-        if bbox:
-            widths.add(bbox[2] - bbox[0])
-
-    # For a true monospace font, all widths should be identical,
-    # but we take the max to be safe
-    char_w = max(widths) if widths else size // 2
+    # Use advance width — the true monospace cell metric
+    char_w = int(font.getlength("M"))
+    if char_w <= 0:
+        char_w = size // 2
 
     # Cell height: use font metrics
     ascent, descent = font.getmetrics()
@@ -93,19 +87,10 @@ def render_glyph(font: ImageFont.FreeTypeFont,
     img = Image.new('L', (char_w, char_h), 0)
     draw = ImageDraw.Draw(img)
 
-    # Position glyph: left-aligned, baseline at `ascent` from top
-    bbox = font.getbbox(ch)
-    if bbox is None:
-        return None
-
-    # Calculate x offset to center the glyph in the cell
-    glyph_w = bbox[2] - bbox[0]
-    x_off = (char_w - glyph_w) // 2 - bbox[0]
-
-    # y offset: align baseline
-    y_off = -bbox[1]
-
-    draw.text((x_off, y_off), ch, fill=255, font=font)
+    # For a monospace font, Pillow positions text at (x, y) with the
+    # glyph's built-in bearings.  We just draw at (0, 0) and let the
+    # font's own metrics handle horizontal and vertical placement.
+    draw.text((0, 0), ch, fill=255, font=font)
 
     # Check if glyph is entirely blank (font doesn't have it)
     pixels = img.tobytes()
