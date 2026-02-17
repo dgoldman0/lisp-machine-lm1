@@ -189,7 +189,7 @@ def test_compiler_emits_nil_t():
 @test("compiler_emits_add", batch="phase8_compiler")
 def test_compiler_emits_add():
     """Compiler emits ADD.FIX for (+ a b)."""
-    cc = Compiler()
+    cc = Compiler(optimize=False)
     cc._compile_expr(['+', 1, 2], {}, dest=1)
     src = cc.get_output()
     assert "ADD.FIX" in src, f"Expected ADD.FIX in:\n{src}"
@@ -198,7 +198,7 @@ def test_compiler_emits_add():
 @test("compiler_emits_if", batch="phase8_compiler")
 def test_compiler_emits_if():
     """Compiler emits branch structure for (if test then else)."""
-    cc = Compiler()
+    cc = Compiler(optimize=False)
     cc._compile_expr(['if', True, 1, 2], {}, dest=1)
     src = cc.get_output()
     assert "BR.NIL" in src

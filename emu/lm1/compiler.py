@@ -143,7 +143,7 @@ class Compiler:
     # Callee-saved registers
     SAVED_REGS = list(range(16, 25))
 
-    def __init__(self):
+    def __init__(self, optimize: bool = True):
         self.lines: list[str] = []      # accumulated assembly output
         self._label_counter = 0
         self._string_table: list[tuple[str, str]] = []  # (label, string)
@@ -154,6 +154,7 @@ class Compiler:
         self._inline_builtins: dict[str, str] = {}  # name → handler method name
         self._current_fn_saved_regs: list[int] = []  # callee-saved regs pushed by current defun
         self._macros: dict[str, tuple[list[str], list]] = {}  # name → (params, body_template)
+        self._optimize_enabled = optimize
 
         # Register inline builtins
         for name in ('car', 'cdr', 'cons', '+', '-', '*', '/', 'eq',
@@ -408,8 +409,52 @@ class Compiler:
     # Expression compilation
     # ------------------------------------------------------------------
 
+    def _optimize(self, expr):
+        """Compile-time constant folding and simplifications."""
+        if not isinstance(expr, list) or not expr:
+            return expr
+        op = expr[0]
+        # Recursively optimize sub-expressions (except quotes)
+        if op == 'quote':
+            return expr
+        optimized = [expr[0]] + [self._optimize(e) for e in expr[1:]]
+        op = optimized[0]
+        args = optimized[1:]
+
+        # Constant folding for arithmetic on literals
+        if op in ('+', '-', '*', '/') and len(args) == 2:
+            a, b = args
+            if isinstance(a, int) and isinstance(b, int):
+                if op == '+': return a + b
+                if op == '-': return a - b
+                if op == '*': return a * b
+                if op == '/' and b != 0: return a // b
+
+        # Boolean constant folding
+        if op == 'if' and len(args) >= 2:
+            test = args[0]
+            if test is True:
+                return args[1]
+            if test is None or test == 0:
+                return args[2] if len(args) > 2 else None
+
+        # Identity elimination
+        if op == '+' and len(args) == 2:
+            if args[0] == 0: return args[1]
+            if args[1] == 0: return args[0]
+        if op == '*' and len(args) == 2:
+            if args[0] == 1: return args[1]
+            if args[1] == 1: return args[0]
+            if args[0] == 0 or args[1] == 0: return 0
+
+        return optimized
+
     def _compile_expr(self, expr, env: dict, dest: int = 1, tail: bool = False) -> None:
         """Compile an expression, putting the result in register `dest`."""
+        # Apply optimizations
+        if self._optimize_enabled:
+            expr = self._optimize(expr)
+
         if expr is None:
             self._emit_instr(f"LI r{dest}, 5")  # NIL
         elif expr is True:
@@ -893,13 +938,26 @@ class Compiler:
     def _compile_builtin(self, op: str, args: list, env: dict, dest: int) -> None:
         """Compile an inline builtin operation."""
         if op == '+':
-            self._compile_arith('ADD.FIX', args, env, dest)
+            # Optimize: (+ x small-const) → ADD.FIX.IMM
+            if len(args) == 2 and isinstance(args[1], int) and -8192 <= tag_fixnum(args[1]) <= 8191:
+                self._compile_expr(args[0], env, dest=dest)
+                self._emit_instr(f"ADD.FIX.IMM r{dest}, r{dest}, {tag_fixnum(args[1])}")
+            elif len(args) == 2 and isinstance(args[0], int) and -8192 <= tag_fixnum(args[0]) <= 8191:
+                # Commutative: (+ small-const x)
+                self._compile_expr(args[1], env, dest=dest)
+                self._emit_instr(f"ADD.FIX.IMM r{dest}, r{dest}, {tag_fixnum(args[0])}")
+            else:
+                self._compile_arith('ADD.FIX', args, env, dest)
         elif op == '-':
             if len(args) == 1:
                 # Unary negation: (- x) → (0 - x)
                 self._emit_instr(f"LI r{self.SCRATCH_REGS[0]}, 0")
                 self._compile_expr(args[0], env, dest=self.SCRATCH_REGS[1])
                 self._emit_instr(f"SUB.FIX r{dest}, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[1]}")
+            elif len(args) == 2 and isinstance(args[1], int) and -8192 <= tag_fixnum(args[1]) <= 8191:
+                # (- x small-const) → ADD.FIX.IMM with negated value
+                self._compile_expr(args[0], env, dest=dest)
+                self._emit_instr(f"ADD.FIX.IMM r{dest}, r{dest}, {-tag_fixnum(args[1])}")
             else:
                 self._compile_arith('SUB.FIX', args, env, dest)
         elif op == '*':

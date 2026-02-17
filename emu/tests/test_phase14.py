@@ -894,3 +894,89 @@ def test_defstruct_multiple():
     out, _ = _compile_direct(forms)
     # (1+2+3) + (10+20+30) = 6 + 60 = 66
     assert out == "66"
+
+
+# ===================================================================
+# Stage 8: Compiler optimizations
+# ===================================================================
+
+@test("opt_const_fold", batch="phase14_stage8")
+def test_opt_const_fold():
+    """Constant folding: (+ 1 2) → 3 at compile time."""
+    cc = Compiler()
+    result = cc._optimize(['+', 1, 2])
+    assert result == 3
+    result = cc._optimize(['*', 3, 4])
+    assert result == 12
+    result = cc._optimize(['-', 10, 3])
+    assert result == 7
+    result = cc._optimize(['/', 15, 3])
+    assert result == 5
+
+
+@test("opt_nested_fold", batch="phase14_stage8")
+def test_opt_nested_fold():
+    """Nested constant folding: (+ (* 2 3) (- 10 4)) → 12."""
+    cc = Compiler()
+    result = cc._optimize(['+', ['*', 2, 3], ['-', 10, 4]])
+    assert result == 12
+
+
+@test("opt_identity_elim", batch="phase14_stage8")
+def test_opt_identity_elim():
+    """Identity elimination: (+ x 0) → x, (* x 1) → x."""
+    cc = Compiler()
+    assert cc._optimize(['+', 'x', 0]) == 'x'
+    assert cc._optimize(['+', 0, 'x']) == 'x'
+    assert cc._optimize(['*', 'x', 1]) == 'x'
+    assert cc._optimize(['*', 1, 'x']) == 'x'
+    assert cc._optimize(['*', 'x', 0]) == 0
+
+
+@test("opt_if_const", batch="phase14_stage8")
+def test_opt_if_const():
+    """Boolean constant folding: (if #t a b) → a."""
+    cc = Compiler()
+    assert cc._optimize(['if', True, 'a', 'b']) == 'a'
+    assert cc._optimize(['if', None, 'a', 'b']) == 'b'
+
+
+@test("opt_add_imm", batch="phase14_stage8")
+def test_opt_add_imm():
+    """(+ x 1) uses ADD.FIX.IMM instead of full arithmetic."""
+    forms = parse("""
+        (defun main ()
+          (let ((x 10))
+            (print-fixnum (+ x 1))))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "11"
+    # Verify it generates ADD.FIX.IMM
+    cc = Compiler()
+    cc.compile_toplevel(forms)
+    asm = cc.get_output()
+    assert 'ADD.FIX.IMM' in asm
+
+
+@test("opt_sub_imm", batch="phase14_stage8")
+def test_opt_sub_imm():
+    """(- x 1) uses ADD.FIX.IMM with negative immediate."""
+    forms = parse("""
+        (defun main ()
+          (let ((x 10))
+            (print-fixnum (- x 3))))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "7"
+
+
+@test("opt_full_program", batch="phase14_stage8")
+def test_opt_full_program():
+    """Constant folding in a real program — no runtime arithmetic for constants."""
+    forms = parse("""
+        (defun main ()
+          (print-fixnum (+ (* 3 4) (- 20 8))))
+    """)
+    out, _ = _compile_direct(forms)
+    # (3*4) + (20-8) = 12 + 12 = 24
+    assert out == "24"
