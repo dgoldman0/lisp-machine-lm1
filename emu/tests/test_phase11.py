@@ -14,6 +14,7 @@ from lm1.desktop import (
     Scrap, ScrapEntry, ResourceDB, DesktopProfile,
     TerminalCrystallite, ClockCrystallite, CalculatorCrystallite,
     InspectorCrystallite, FileManagerCrystallite, ControlPanelCrystallite,
+    TextEditorCrystallite,
     _print_form,
 )
 
@@ -324,11 +325,11 @@ def test_inspector_pixel_probe():
 
 @test("filemanager_create", batch="phase11")
 def test_filemanager_create():
-    """File manager opens and shows directory contents."""
+    """File manager opens and shows VFS directory contents."""
     aes = _make_aes()
-    fm = FileManagerCrystallite(aes, path=".")
+    fm = FileManagerCrystallite(aes, path="/")
     assert fm.win in aes._windows
-    assert len(fm._entries) > 0  # should find some files
+    assert len(fm._entries) > 0  # VFS has default dirs
     aes.redraw()
 
 
@@ -336,9 +337,9 @@ def test_filemanager_create():
 def test_filemanager_entries_sorted():
     """File manager lists directories before files."""
     aes = _make_aes()
-    fm = FileManagerCrystallite(aes, path=".")
+    fm = FileManagerCrystallite(aes, path="/users/default")
+    # VFS default has dirs (desktop, documents, downloads, projects)
     if len(fm._entries) >= 2:
-        # Find first file
         first_file_idx = None
         last_dir_idx = None
         for i, (name, is_dir) in enumerate(fm._entries):
@@ -355,17 +356,17 @@ def test_filemanager_entries_sorted():
 def test_filemanager_navigate_parent():
     """File manager navigates to parent directory."""
     aes = _make_aes()
-    start = os.path.abspath(".")
-    fm = FileManagerCrystallite(aes, path=start)
+    fm = FileManagerCrystallite(aes, path="/users/default/documents")
+    assert fm.path == "/users/default/documents"
     fm._go_parent()
-    assert fm.path == os.path.dirname(start)
+    assert fm.path == "/users/default"
 
 
 @test("filemanager_open_subdir", batch="phase11")
 def test_filemanager_open_subdir():
     """Opening a subdirectory creates a new file manager window."""
     aes = _make_aes()
-    fm = FileManagerCrystallite(aes, path=".")
+    fm = FileManagerCrystallite(aes, path="/")
     initial_windows = len(aes._windows)
     # Find a directory entry
     for i, (name, is_dir) in enumerate(fm._entries):
@@ -377,16 +378,16 @@ def test_filemanager_open_subdir():
 
 @test("filemanager_select_file_to_scrap", batch="phase11")
 def test_filemanager_select_file_to_scrap():
-    """Selecting a file puts its info on the scrap."""
+    """Selecting a text file opens the editor."""
     aes = _make_aes()
-    fm = FileManagerCrystallite(aes, path=".")
-    # Find a file entry
+    fm = FileManagerCrystallite(aes, path="/users/default/documents")
+    initial_windows = len(aes._windows)
+    # Find a text/lisp file entry
     for i, (name, is_dir) in enumerate(fm._entries):
-        if not is_dir:
+        if not is_dir and (name.endswith('.txt') or name.endswith('.lisp')):
             fm._open_entry(i)
-            assert not aes.scrap.empty
-            entry = aes.scrap.get()
-            assert name in entry.data
+            # Should open an editor window
+            assert len(aes._windows) == initial_windows + 1
             break
 
 
@@ -427,7 +428,7 @@ def test_full_desktop_all_crystallites():
     CalculatorCrystallite(aes)
     InspectorCrystallite(aes)
     ControlPanelCrystallite(aes)
-    FileManagerCrystallite(aes, path=".")
+    FileManagerCrystallite(aes, path="/")
     aes.redraw()
     fb = aes.vdi.fb
     unique = set(fb)

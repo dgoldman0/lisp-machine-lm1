@@ -1,113 +1,164 @@
-"""Crystal Desktop — GEM-inspired window manager for LM-1.
+"""Crystal Desktop — Window Manager and Applications for the LM-1 List Machine.
 
-Host-side implementation using VDI for all rendering.
-Phase 12+ will port this to native Lisp running on the emulator.
-
-Architecture:
-  - AES (Application Environment Services): manages windows, z-order,
-    event dispatch, menu bar
-  - Each window has: position, size, title, decorations, content callback
-  - Click-to-focus, overlapping windows, move/resize/raise/lower
-  - Global menu bar (GEM-style: active app's menu)
-  - Desktop root window with background pattern
+Phase 13: OS Foundation rewrite.  Integrates the widget toolkit, virtual
+filesystem, and icon system to deliver a modern desktop experience with
+taskbar, desktop icons, minimize/maximize, and real applications.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Callable, Optional, Any
-import time
+
 import os
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Optional
 
 from .vdi import (
-    VDI, GRAD_VERTICAL, BG_TRANSPARENT,
+    VDI, BG_TRANSPARENT, GRAD_VERTICAL,
     EVT_NONE, EVT_KEY_DOWN, EVT_KEY_UP,
-    EVT_MOUSE_MOVE, EVT_MOUSE_DOWN, EVT_MOUSE_UP, EVT_QUIT, EVT_TIMER,
+    EVT_MOUSE_MOVE, EVT_MOUSE_DOWN, EVT_MOUSE_UP, EVT_QUIT,
 )
+from .vfs import VFS, VFSFile, VFSDirectory
+from .icons import Icon, get_icon, icon_for_name, icon_for_mime
+
+
+# Helper: normalize a VFS path string
+def _vfs_normalize(path: str) -> str:
+    """Normalize a VFS path to canonical form."""
+    parts: list[str] = []
+    for p in path.strip('/').split('/'):
+        if not p or p == '.':
+            continue
+        if p == '..':
+            if parts:
+                parts.pop()
+        else:
+            parts.append(p)
+    return '/' + '/'.join(parts) if parts else '/'
 
 
 # ===================================================================
-# Color scheme
+# Window flags
+# ===================================================================
+
+WIN_CLOSEABLE   = 0x01
+WIN_MOVEABLE    = 0x02
+WIN_RESIZABLE   = 0x04
+WIN_MAXIMIZABLE = 0x08
+WIN_MINIMIZABLE = 0x10
+
+# ===================================================================
+# Layout constants
+# ===================================================================
+
+TITLE_BAR_H  = 28
+BORDER_W     = 2
+MENU_BAR_H   = 22
+TASKBAR_H    = 34
+MIN_WIN_W    = 120
+MIN_WIN_H    = 80
+CLOSE_BTN_W  = 16
+CLOSE_BTN_H  = 16
+MAX_BTN_W    = 14
+MAX_BTN_H    = 14
+MIN_BTN_W    = 14
+MIN_BTN_H    = 14
+GRIP_SIZE    = 12
+
+
+# ===================================================================
+# Color theme — dark retro-futuristic
 # ===================================================================
 
 class Colors:
-    """0xRRGGBB color constants — retro-futuristic Crystal Desktop theme."""
-    BLACK       = 0x1A1A2E
-    WHITE       = 0xF0F0F5
-    LIGHT_GRAY  = 0xC8C8D0
-    MID_GRAY    = 0x888898
-    DARK_GRAY   = 0x505068
+    """Central color palette — dark retro-futuristic theme."""
 
-    # Accent palette
-    BLUE        = 0x3A7BD5
-    CYAN        = 0x00D2FF
-    GREEN       = 0x00E676
-    RED         = 0xE53935
-    YELLOW      = 0xFFD740
-    MAGENTA     = 0xD500F9
+    # Desktop
+    DESKTOP_BG       = 0x1A1A2E
+    DESKTOP_BG_END   = 0x16213E
+    DESKTOP_ICON_TXT = 0xCCCCDD
+    DESKTOP_ICON_SEL = 0x335588
 
-    # Desktop background gradient
-    DESKTOP_BG           = 0x0F1B2D   # deep navy
-    DESKTOP_BG_END       = 0x1A2744   # slightly lighter navy at bottom
+    # Window chrome
+    TITLE_BAR_ACTIVE     = 0x2A3A5C
+    TITLE_BAR_ACTIVE_END = 0x1E2D4A
+    TITLE_BAR_INACTIVE     = 0x2A2A3A
+    TITLE_BAR_INACTIVE_END = 0x1E1E2E
+    TITLE_TEXT        = 0xDDDDEE
+    TITLE_TEXT_SHADOW = 0x0A0A14
+    WINDOW_BG         = 0x1E1E2E
+    WINDOW_BORDER     = 0x333355
 
-    # Title bars
-    TITLE_BAR_ACTIVE     = 0x3A7BD5   # bright blue
-    TITLE_BAR_ACTIVE_END = 0x1E4B8C   # deeper blue gradient end
-    TITLE_BAR_INACTIVE   = 0x3A3A50   # muted dark
-    TITLE_BAR_INACTIVE_END = 0x2A2A3E
-    TITLE_TEXT            = 0xFFFFFF
-    TITLE_TEXT_SHADOW     = 0x0A0A20   # dark shadow behind title
-
-    # Window
-    WINDOW_BG            = 0xF8F8FC
-    WINDOW_BORDER        = 0x3A3A50   # soft dark border, not black
-
-    # Close button
-    CLOSE_BTN_BG         = 0xE53935   # red
-    CLOSE_BTN_BG_ALT     = 0xC62828   # darker red for gradient
-    CLOSE_BTN_X          = 0xFFFFFF   # white ×
+    # Close / min / max buttons
+    CLOSE_BTN_BG = 0xCC4444
+    CLOSE_BTN_X  = 0xFFFFFF
+    MAX_BTN_BG   = 0x44AA44
+    MAX_BTN_FG   = 0xFFFFFF
+    MIN_BTN_BG   = 0xDDAA22
+    MIN_BTN_FG   = 0xFFFFFF
 
     # Menu bar
-    MENU_BAR_BG          = 0x1C2840   # dark navy to match desktop
-    MENU_BAR_BG_END      = 0x243352
-    MENU_BAR_TEXT         = 0xC8D0E0   # light cool gray
-    MENU_BAR_SEPARATOR   = 0x3A4A66   # subtle line
-    MENU_HIGHLIGHT       = 0x3A7BD5
-    MENU_HI_TEXT          = 0xFFFFFF
+    MENU_BAR_BG       = 0x14141E
+    MENU_BAR_BG_END   = 0x1A1A28
+    MENU_BAR_TEXT      = 0xBBBBCC
+    MENU_BAR_SEPARATOR = 0x333355
+    MENU_HIGHLIGHT     = 0x335588
+    MENU_HI_TEXT       = 0xFFFFFF
 
-    # Dropdown menus
-    DROPDOWN_BG          = 0x1E2A44
-    DROPDOWN_BORDER      = 0x3A4A66
-    DROPDOWN_TEXT         = 0xD0D8E8
-    DROPDOWN_SEPARATOR   = 0x2A3A56
+    # Dropdown menu
+    DROPDOWN_BG        = 0x1A1A28
+    DROPDOWN_BORDER    = 0x444466
+    DROPDOWN_TEXT      = 0xCCCCDD
+    DROPDOWN_SEPARATOR = 0x333355
 
-    # Buttons/widgets
-    BUTTON_BG            = 0x2A3450
-    BUTTON_BG_END        = 0x1E2840
-    BUTTON_BORDER        = 0x4A5A78
-    BUTTON_TEXT           = 0xD0D8E8
+    # Buttons
+    BUTTON_BG     = 0x2A2A3E
+    BUTTON_BG_END = 0x222236
+    BUTTON_BORDER = 0x444466
+    BUTTON_TEXT   = 0xCCCCDD
 
-    # Scrollbar
-    SCROLLBAR_BG         = 0x1A2540
-    SCROLLBAR_FG         = 0x3A4A66
-
-    # Shadows
-    SHADOW_COLOR         = 0x000000
-    SHADOW_ALPHA         = 90
+    # Taskbar
+    TASKBAR_BG       = 0x101018
+    TASKBAR_BG_END   = 0x181824
+    TASKBAR_BTN_BG   = 0x222236
+    TASKBAR_BTN_ACT  = 0x335588
+    TASKBAR_BTN_TXT  = 0xBBBBCC
+    TASKBAR_SEP      = 0x333355
+    TASKBAR_CLOCK    = 0x88BBDD
 
     # Resize grip
-    GRIP_DOT             = 0x4A5A78
+    GRIP_DOT     = 0x555577
+    SHADOW_ALPHA = 40
+
+    # Accent colors
+    BLACK      = 0x000000
+    WHITE      = 0xFFFFFF
+    RED        = 0xFF4444
+    GREEN      = 0x44FF88
+    BLUE       = 0x4488FF
+    CYAN       = 0x44DDFF
+    YELLOW     = 0xFFDD44
+    MAGENTA    = 0xDD44FF
+    ORANGE     = 0xFF8844
+    DARK_GRAY  = 0x666688
+    LIGHT_GRAY = 0xAAAABB
 
 
 # ===================================================================
-# Scrap (Clipboard) System
+# Scrap (Clipboard) system
 # ===================================================================
 
 @dataclass
 class ScrapEntry:
-    """A single clipboard entry with type and data."""
-    scrap_type: str          # MIME-like type: 'text/plain', 'lisp/form', etc.
-    data: Any                # the payload
-    timestamp: float = 0.0   # when it was placed
+    """A single scrap (clipboard) entry.
+
+    Attributes:
+        data:        The payload — text, Lisp form, binary, etc.
+        scrap_type:  MIME-style type tag ('text/plain', 'lisp/form', …).
+        timestamp:   When this entry was created.
+    """
+    data: object
+    scrap_type: str
+    timestamp: float = 0.0
 
     def __post_init__(self):
         if self.timestamp == 0.0:
@@ -115,74 +166,67 @@ class ScrapEntry:
 
 
 class Scrap:
-    """Typed structured clipboard with history.
+    """Desktop clipboard with type negotiation and history ring.
 
-    Supports multiple data types and maintains a history ring.
-    Type negotiation: a consumer can request a preferred type,
-    and the scrap will attempt conversion.
+    Scrap supports multiple data types and can convert between them
+    (e.g. text/plain ↔ lisp/form) using type negotiation.
     """
-
     MAX_HISTORY = 16
 
     def __init__(self):
-        self._history: list[ScrapEntry] = []
+        self._current: Optional[ScrapEntry] = None
+        self.history: list[ScrapEntry] = []
 
-    def put(self, data: Any, scrap_type: str = 'text/plain') -> None:
-        """Place data on the scrap with the given type."""
-        entry = ScrapEntry(scrap_type=scrap_type, data=data)
-        self._history.append(entry)
-        if len(self._history) > self.MAX_HISTORY:
-            self._history.pop(0)
+    @property
+    def empty(self) -> bool:
+        return self._current is None
 
-    def get(self, preferred_type: str = 'text/plain') -> Optional[ScrapEntry]:
-        """Get the most recent scrap entry, with optional type negotiation.
+    def put(self, data: object, scrap_type: str = "text/plain") -> None:
+        """Place data on the scrap."""
+        entry = ScrapEntry(data=data, scrap_type=scrap_type)
+        self._current = entry
+        self.history.append(entry)
+        if len(self.history) > self.MAX_HISTORY:
+            self.history = self.history[-self.MAX_HISTORY:]
 
-        If the top entry doesn't match preferred_type, attempts conversion:
-          - lisp/form → text/plain: uses print_form
-          - text/plain → lisp/form: attempts parse
-        Returns None if the scrap is empty.
-        """
-        if not self._history:
+    def get(self, requested_type: str | None = None) -> ScrapEntry | None:
+        """Get current scrap, optionally converting to requested_type."""
+        if self._current is None:
             return None
-        entry = self._history[-1]
-        if entry.scrap_type == preferred_type:
-            return entry
-        # Type negotiation / conversion
-        converted = self._convert(entry, preferred_type)
-        return converted if converted else entry
+        if requested_type is None or requested_type == self._current.scrap_type:
+            return self._current
+        return self._convert(self._current, requested_type)
 
-    def _convert(self, entry: ScrapEntry, target_type: str) -> Optional[ScrapEntry]:
-        """Attempt to convert a scrap entry to a different type."""
-        if entry.scrap_type == 'lisp/form' and target_type == 'text/plain':
-            return ScrapEntry('text/plain', _print_form(entry.data),
-                              entry.timestamp)
-        if entry.scrap_type == 'text/plain' and target_type == 'lisp/form':
+    def clear(self) -> None:
+        """Clear the scrap."""
+        self._current = None
+        self.history.clear()
+
+    def _convert(self, entry: ScrapEntry, target: str) -> ScrapEntry | None:
+        """Type negotiation — convert between data types."""
+        if entry.scrap_type == "lisp/form" and target == "text/plain":
+            return ScrapEntry(data=_print_form(entry.data),
+                              scrap_type="text/plain",
+                              timestamp=entry.timestamp)
+        if entry.scrap_type == "text/plain" and target == "lisp/form":
             try:
                 from .compiler import parse
                 forms = parse(str(entry.data))
-                if len(forms) == 1:
-                    return ScrapEntry('lisp/form', forms[0], entry.timestamp)
-                return ScrapEntry('lisp/form', forms, entry.timestamp)
+                result = forms[0] if len(forms) == 1 else forms
+                return ScrapEntry(data=result,
+                                  scrap_type="lisp/form",
+                                  timestamp=entry.timestamp)
             except Exception:
                 return None
         return None
 
-    @property
-    def history(self) -> list[ScrapEntry]:
-        """Return the full history (oldest first)."""
-        return list(self._history)
 
-    @property
-    def empty(self) -> bool:
-        return len(self._history) == 0
+# ===================================================================
+# Helper: print a Lisp form as a string
+# ===================================================================
 
-    def clear(self) -> None:
-        """Clear all scrap history."""
-        self._history.clear()
-
-
-def _print_form(form: Any) -> str:
-    """Convert a Lisp form to its string representation."""
+def _print_form(form) -> str:
+    """Convert a Lisp form to a readable string."""
     if form is None:
         return "nil"
     if form is True:
@@ -195,300 +239,213 @@ def _print_form(form: Any) -> str:
 
 
 # ===================================================================
-# Resource System — menus/dialogs/alerts as Lisp data
+# Resource Database
 # ===================================================================
 
 class ResourceDB:
-    """Resource database: stores UI definitions as Lisp-style data.
-
-    Resources are identified by (type, id) pairs:
-      - 'menu'   → menu bar definition as list
-      - 'dialog' → dialog layout as list
-      - 'alert'  → alert text and buttons as list
-      - 'string' → localized string table
-
-    Resources can be loaded from Lisp source files, edited at runtime,
-    and serialized back to files — enabling live UI customization.
+    """Resource database — stores UI resources (strings, menus, alerts)
+    by (type, name) key.  Supports Lisp-format loading and serialization.
     """
 
     def __init__(self):
-        self._resources: dict[tuple[str, str], Any] = {}
+        self._resources: dict[tuple[str, str], object] = {}
 
-    def put(self, res_type: str, res_id: str, data: Any) -> None:
-        """Store a resource."""
-        self._resources[(res_type, res_id)] = data
+    # -- CRUD --------------------------------------------------------
 
-    def get(self, res_type: str, res_id: str) -> Optional[Any]:
-        """Retrieve a resource, or None if not found."""
-        return self._resources.get((res_type, res_id))
+    def put(self, rtype: str, name: str, data: object) -> None:
+        self._resources[(rtype, name)] = data
 
-    def delete(self, res_type: str, res_id: str) -> bool:
-        """Remove a resource. Returns True if it existed."""
-        return self._resources.pop((res_type, res_id), None) is not None
+    def get(self, rtype: str, name: str) -> object | None:
+        return self._resources.get((rtype, name))
 
-    def list_resources(self, res_type: Optional[str] = None
-                       ) -> list[tuple[str, str]]:
-        """List all resource keys, optionally filtered by type."""
-        if res_type is None:
-            return list(self._resources.keys())
-        return [(t, i) for t, i in self._resources if t == res_type]
+    def delete(self, rtype: str, name: str) -> bool:
+        return self._resources.pop((rtype, name), None) is not None
+
+    def list_resources(self) -> list[tuple[str, str]]:
+        return list(self._resources.keys())
+
+    # -- Lisp serialization ------------------------------------------
 
     def load_from_lisp(self, source: str) -> int:
-        """Load resources from Lisp source text.
-
-        Format: (resource <type> <id> <data>)
-        Returns number of resources loaded.
-        """
+        """Load resources from Lisp source text.  Returns count loaded."""
         from .compiler import parse
         forms = parse(source)
         count = 0
         for form in forms:
-            if (isinstance(form, list) and len(form) >= 4 and
-                    form[0] == 'resource'):
-                res_type = str(form[1])
-                res_id = str(form[2])
-                self._resources[(res_type, res_id)] = form[3]
+            if isinstance(form, list) and len(form) >= 4 and form[0] == 'resource':
+                rtype = str(form[1])
+                name = str(form[2])
+                data = form[3:]
+                if len(data) == 1:
+                    data = data[0]
+                self.put(rtype, name, data)
                 count += 1
         return count
 
     def to_lisp(self) -> str:
-        """Serialize all resources to Lisp source text."""
-        lines = []
-        for (res_type, res_id), data in sorted(self._resources.items()):
-            lines.append(f"(resource {res_type} {res_id} {_print_form(data)})")
-        return "\n".join(lines)
+        """Serialize all resources to Lisp source."""
+        lines: list[str] = []
+        for (rtype, name), data in sorted(self._resources.items()):
+            lines.append(f"(resource {rtype} {name} {_print_form(data)})")
+        return "\n".join(lines) + "\n"
 
-    def build_menu(self, res_id: str,
-                   callbacks: Optional[dict[str, Callable]] = None
-                   ) -> Optional[list[Menu]]:
-        """Build Menu objects from a menu resource definition.
+    # -- Menu builder ------------------------------------------------
 
-        Resource format:
-          (menu <id>
-            (menu-item <label> <callback-key>)
-            (separator)
-            (submenu <label>
-              (menu-item <label> <callback-key>)
-              ...))
-
-        Returns list of Menu objects.
-        """
-        data = self.get('menu', res_id)
-        if data is None:
+    def build_menu(self, name: str,
+                   commands: dict[str, Callable] | None = None
+                   ) -> list[Menu] | None:
+        """Build Menu objects from a resource definition."""
+        data = self.get("menu", name)
+        if data is None or not isinstance(data, list):
             return None
-        callbacks = callbacks or {}
-        return self._parse_menu_list(data, callbacks)
-
-    def _parse_menu_list(self, data: Any,
-                         callbacks: dict[str, Callable]) -> list[Menu]:
-        """Parse a list of menu/submenu forms into Menu objects."""
-        if not isinstance(data, list):
-            return []
-        menus = []
-        for item in data:
-            if not isinstance(item, list) or len(item) < 2:
+        commands = commands or {}
+        menus: list[Menu] = []
+        for submenu in data:
+            if not isinstance(submenu, list) or submenu[0] != 'submenu':
                 continue
-            tag = item[0]
-            if tag == 'submenu' or tag == 'menu':
-                label = str(item[1])
-                items = self._parse_menu_items(item[2:], callbacks)
-                menus.append(Menu(label, items))
+            label = str(submenu[1])
+            items: list[MenuItem] = []
+            for entry in submenu[2:]:
+                if isinstance(entry, list):
+                    if entry[0] == 'menu-item':
+                        item_label = str(entry[1])
+                        cmd = str(entry[2]) if len(entry) > 2 else ""
+                        cb = commands.get(cmd)
+                        items.append(MenuItem(label=item_label, callback=cb))
+                    elif entry[0] == 'separator':
+                        items.append(MenuItem(label="", separator=True))
+            menus.append(Menu(label=label, items=items))
         return menus
 
-    def _parse_menu_items(self, items: list,
-                          callbacks: dict[str, Callable]) -> list[MenuItem]:
-        """Parse menu item forms."""
-        result = []
-        for item in items:
-            if not isinstance(item, list) or not item:
-                continue
-            tag = item[0]
-            if tag == 'separator':
-                result.append(MenuItem("", separator=True))
-            elif tag == 'menu-item' and len(item) >= 3:
-                label = str(item[1])
-                cb_key = str(item[2])
-                cb = callbacks.get(cb_key)
-                result.append(MenuItem(label, callback=cb))
-        return result
+    # -- Alert helper ------------------------------------------------
 
-    def show_alert(self, aes: 'AES', res_id: str) -> Optional['Window']:
-        """Show an alert dialog from a resource definition.
-
-        Resource format: (alert <id> <title> <message-line1> <line2> ...)
-        """
-        data = self.get('alert', res_id)
-        if data is None:
-            return None
-        if not isinstance(data, list) or len(data) < 2:
+    def show_alert(self, aes: AES, name: str) -> Window | None:
+        """Show an alert dialog from a stored resource."""
+        data = self.get("alert", name)
+        if data is None or not isinstance(data, list):
             return None
         title = str(data[0]) if data else "Alert"
-        message_lines = [str(x) for x in data[1:]]
+        body = [str(x) for x in data[1:]]
 
-        cw_f = aes.vdi.font.char_w
-        ch_f = aes.vdi.font.char_h
-        max_line = max(len(line) for line in message_lines) if message_lines else 10
-        w = max(200, max_line * cw_f + 32)
-        h = TITLE_BAR_H + len(message_lines) * (ch_f + 2) + 24
+        w = 300
+        h = 80 + len(body) * 25
         x = (aes.vdi.width - w) // 2
         y = (aes.vdi.height - h) // 2
 
         def draw_alert(vdi: VDI, win: Window):
             cx, cy, cw, ch = win.client_rect()
+            cw_f = vdi.font.char_w
+            ch_f = vdi.font.char_h
             vdi.fill_rect(cx, cy, cw, ch, Colors.DROPDOWN_BG)
-            for i, line in enumerate(message_lines):
-                tx = cx + (cw - len(line) * vdi.font.char_w) // 2
-                ty = cy + 8 + i * (vdi.font.char_h + 2)
-                vdi.draw_string(tx, ty, line,
-                                 Colors.DROPDOWN_TEXT, Colors.DROPDOWN_BG)
+            for i, line in enumerate(body):
+                tx = cx + (cw - len(line) * cw_f) // 2
+                ty = cy + 10 + i * (ch_f + 4)
+                vdi.draw_string(tx, ty, line, Colors.DROPDOWN_TEXT,
+                                Colors.DROPDOWN_BG)
 
         return aes.create_window(title, x, y, w, h,
-                                  flags=WIN_CLOSEABLE | WIN_MOVEABLE,
-                                  on_redraw=draw_alert)
+                                 flags=WIN_CLOSEABLE | WIN_MOVEABLE,
+                                 on_redraw=draw_alert)
 
 
 # ===================================================================
-# Desktop Profile — serialize/deserialize desktop state
+# Desktop Profile  (save / load window layout)
 # ===================================================================
 
 class DesktopProfile:
-    """Serialize and restore desktop state as Lisp forms.
-
-    Profile format (Lisp):
-      (desktop-profile
-        (resolution <width> <height>)
-        (windows
-          (window <title> <x> <y> <w> <h> <type>)
-          ...))
-    """
+    """Serialize and restore desktop window layouts."""
 
     @staticmethod
-    def save(aes: 'AES') -> str:
-        """Serialize current desktop state to a Lisp form string."""
+    def save(aes: AES) -> str:
+        """Serialize current desktop to Lisp."""
+        from .compiler import parse
         lines = ["(desktop-profile"]
-        lines.append(f"  (resolution {aes.vdi.width} {aes.vdi.height})")
-        lines.append("  (windows")
         for win in aes._windows:
-            # Determine crystallite type by title convention
-            win_type = DesktopProfile._infer_type(win)
-            title = win.title.replace('"', '\\"')
-            lines.append(f'    (window "{title}" {win.x} {win.y}'
-                         f' {win.w} {win.h} {win_type})')
-        lines.append("  ))")
+            wtype = DesktopProfile._infer_type(win)
+            lines.append(
+                f"  (window {wtype} {win.x} {win.y} {win.w} {win.h})"
+            )
+        lines.append(")")
         return "\n".join(lines)
 
     @staticmethod
-    def load(aes: 'AES', source: str) -> int:
-        """Restore desktop state from a Lisp form string.
-
-        Returns the number of windows restored.
-        Side effect: creates windows via the appropriate crystallite
-        constructors.
-        """
+    def load(aes: AES, source: str) -> int:
+        """Restore desktop from Lisp source.  Returns window count."""
         from .compiler import parse
         forms = parse(source)
         count = 0
         for form in forms:
-            if not isinstance(form, list) or not form:
-                continue
-            if form[0] != 'desktop-profile':
-                continue
-            for item in form[1:]:
-                if not isinstance(item, list) or not item:
-                    continue
-                if item[0] == 'windows':
-                    for wdef in item[1:]:
-                        if DesktopProfile._restore_window(aes, wdef):
+            if isinstance(form, list) and form[0] == 'desktop-profile':
+                for entry in form[1:]:
+                    if isinstance(entry, list) and entry[0] == 'window':
+                        if DesktopProfile._restore_window(aes, entry):
                             count += 1
         return count
 
     @staticmethod
-    def _infer_type(win: 'Window') -> str:
-        """Infer crystallite type from window title."""
-        t = win.title.lower()
-        if 'terminal' in t:
-            return 'terminal'
-        if 'clock' in t:
-            return 'clock'
-        if 'calculator' in t or 'calc' in t:
-            return 'calculator'
-        if 'inspector' in t:
-            return 'inspector'
-        if 'control' in t or 'panel' in t:
-            return 'control-panel'
-        if 'file' in t or 'folder' in t:
-            return 'file-manager'
-        return 'generic'
-
-    @staticmethod
-    def _restore_window(aes: 'AES', wdef: Any) -> bool:
-        """Restore a single window from a (window ...) form."""
-        if (not isinstance(wdef, list) or len(wdef) < 6 or
-                wdef[0] != 'window'):
-            return False
-        title = str(wdef[1]).strip('"')
-        x, y, w, h = int(wdef[2]), int(wdef[3]), int(wdef[4]), int(wdef[5])
-        win_type = str(wdef[6]) if len(wdef) > 6 else 'generic'
-
-        if win_type == 'terminal':
-            TerminalCrystallite(aes, x=x, y=y, w=w, h=h)
-        elif win_type == 'clock':
-            ClockCrystallite(aes, x=x, y=y)
-        elif win_type == 'calculator':
-            CalculatorCrystallite(aes, x=x, y=y)
-        elif win_type == 'inspector':
-            InspectorCrystallite(aes, x=x, y=y)
-        elif win_type == 'control-panel':
-            ControlPanelCrystallite(aes, x=x, y=y)
-        elif win_type == 'file-manager':
-            FileManagerCrystallite(aes, path=".", x=x, y=y, w=w, h=h)
-        else:
-            aes.create_window(title, x, y, w, h)
-        return True
-
-    @staticmethod
-    def save_to_file(aes: 'AES', path: str) -> None:
-        """Save desktop profile to a file."""
+    def save_to_file(aes: AES, path: str) -> None:
+        data = DesktopProfile.save(aes)
         with open(path, 'w') as f:
-            f.write(DesktopProfile.save(aes))
+            f.write(data)
 
     @staticmethod
-    def load_from_file(aes: 'AES', path: str) -> int:
-        """Load desktop profile from a file."""
-        with open(path, 'r') as f:
+    def load_from_file(aes: AES, path: str) -> int:
+        with open(path) as f:
             return DesktopProfile.load(aes, f.read())
+
+    @staticmethod
+    def _infer_type(win: Window) -> str:
+        """Infer crystallite type from window properties."""
+        ct = getattr(win, '_cryst_type', '')
+        if ct:
+            return ct
+        title = win.title.lower()
+        if 'terminal' in title:
+            return 'terminal'
+        if 'clock' in title:
+            return 'clock'
+        if 'calculator' in title:
+            return 'calculator'
+        if 'inspector' in title:
+            return 'inspector'
+        if 'control' in title:
+            return 'control-panel'
+        if 'editor' in title:
+            return 'editor'
+        return 'window'
+
+    @staticmethod
+    def _restore_window(aes: AES, entry: list) -> bool:
+        """Restore a single window from a profile entry."""
+        if len(entry) < 6:
+            return False
+        wtype = str(entry[1])
+        x, y, w, h = int(entry[2]), int(entry[3]), int(entry[4]), int(entry[5])
+        if wtype == 'terminal':
+            TerminalCrystallite(aes, x=x, y=y, w=w, h=h)
+        elif wtype == 'clock':
+            ClockCrystallite(aes, x=x, y=y)
+        elif wtype == 'calculator':
+            CalculatorCrystallite(aes, x=x, y=y)
+        elif wtype == 'inspector':
+            InspectorCrystallite(aes, x=x, y=y, w=w, h=h)
+        elif wtype == 'control-panel':
+            ControlPanelCrystallite(aes, x=x, y=y)
+        elif wtype == 'editor':
+            TextEditorCrystallite(aes, x=x, y=y, w=w, h=h)
+        else:
+            aes.create_window(wtype, x, y, w, h)
+        return True
 
 
 # ===================================================================
 # Window
 # ===================================================================
 
-# Window flags
-WIN_CLOSEABLE   = 0x01
-WIN_MOVEABLE    = 0x02
-WIN_RESIZABLE   = 0x04
-WIN_FULLABLE    = 0x08
-WIN_HAS_VSCROLL = 0x10
-WIN_HAS_HSCROLL = 0x20
-
-TITLE_BAR_H = 26
-BORDER_W    = 1
-MENU_BAR_H  = 26
-MIN_WIN_W   = 100
-MIN_WIN_H   = 80
-
-# Close button
-CLOSE_BTN_W = 18
-CLOSE_BTN_H = 16
-
-# Resize grip
-GRIP_SIZE = 14
-
-
 @dataclass
 class Window:
-    """A managed window in the Crystal Desktop."""
-    wid: int                          # unique window ID
+    """A desktop window managed by the AES."""
+    wid: int
     title: str
     x: int
     y: int
@@ -496,62 +453,66 @@ class Window:
     h: int
     flags: int = WIN_CLOSEABLE | WIN_MOVEABLE | WIN_RESIZABLE
     visible: bool = True
-    # Content area (in window-local coords)
-    content_x: int = 0
-    content_y: int = 0
-    content_w: int = 0
-    content_h: int = 0
-    # Callbacks
-    on_redraw: Optional[Callable] = None   # (vdi, window) → None
-    on_key: Optional[Callable] = None      # (window, key, mod) → None
-    on_click: Optional[Callable] = None    # (window, x, y, button) → None
-    on_close: Optional[Callable] = None    # (window) → bool (False to cancel)
-    on_resize: Optional[Callable] = None   # (window, new_w, new_h) → None
-    # App menu (list of (label, [(item_label, callback), ...]))
-    menu: list = field(default_factory=list)
-    # Scroll state
+    on_redraw: Optional[Callable] = None
+    on_click: Optional[Callable] = None
+    on_key: Optional[Callable] = None
+    on_close: Optional[Callable] = None
+    on_resize: Optional[Callable] = None
+    menu: Optional[list] = None
     scroll_x: int = 0
     scroll_y: int = 0
-    doc_w: int = 0   # virtual document size
-    doc_h: int = 0
+    minimized: bool = False
+    maximized: bool = False
+    _pre_max_rect: Optional[tuple] = None
 
     def client_rect(self) -> tuple[int, int, int, int]:
-        """Return (x, y, w, h) of the content area in screen coords."""
-        cx = self.x + BORDER_W
-        cy = self.y + TITLE_BAR_H
-        cw = self.w - 2 * BORDER_W
-        ch = self.h - TITLE_BAR_H - BORDER_W
-        return cx, cy, cw, ch
+        """Return (cx, cy, cw, ch) of the content area."""
+        return (self.x + BORDER_W,
+                self.y + TITLE_BAR_H,
+                self.w - 2 * BORDER_W,
+                self.h - TITLE_BAR_H - BORDER_W)
 
     def contains(self, sx: int, sy: int) -> bool:
-        """Check if screen point (sx, sy) is inside this window."""
         return (self.x <= sx < self.x + self.w and
                 self.y <= sy < self.y + self.h)
 
-    def in_title_bar(self, sx: int, sy: int) -> bool:
-        """Check if point is in the title bar."""
-        return (self.x <= sx < self.x + self.w and
-                self.y <= sy < self.y + TITLE_BAR_H)
+    def in_title_bar(self, mx: int, my: int) -> bool:
+        return (self.x <= mx < self.x + self.w and
+                self.y <= my < self.y + TITLE_BAR_H)
 
-    def in_close_button(self, sx: int, sy: int) -> bool:
-        """Check if point is on the close button."""
+    def in_close_button(self, mx: int, my: int) -> bool:
         if not (self.flags & WIN_CLOSEABLE):
             return False
-        bx = self.x + 2
-        by = self.y + 2
-        return bx <= sx < bx + CLOSE_BTN_W and by <= sy < by + CLOSE_BTN_H
+        bx, by = self.x + 3, self.y + 2
+        return (bx <= mx < bx + CLOSE_BTN_W and
+                by <= my < by + CLOSE_BTN_H)
 
-    def in_resize_grip(self, sx: int, sy: int) -> bool:
-        """Check if point is on the resize grip (bottom-right corner)."""
+    def in_maximize_button(self, mx: int, my: int) -> bool:
+        if not (self.flags & WIN_MAXIMIZABLE):
+            return False
+        bx = self.x + self.w - 3 - MAX_BTN_W
+        by = self.y + (TITLE_BAR_H - MAX_BTN_H) // 2
+        return (bx <= mx < bx + MAX_BTN_W and
+                by <= my < by + MAX_BTN_H)
+
+    def in_minimize_button(self, mx: int, my: int) -> bool:
+        if not (self.flags & WIN_MINIMIZABLE):
+            return False
+        bx = self.x + self.w - 3 - MAX_BTN_W - 4 - MIN_BTN_W
+        by = self.y + (TITLE_BAR_H - MIN_BTN_H) // 2
+        return (bx <= mx < bx + MIN_BTN_W and
+                by <= my < by + MIN_BTN_H)
+
+    def in_resize_grip(self, mx: int, my: int) -> bool:
         if not (self.flags & WIN_RESIZABLE):
             return False
         gx = self.x + self.w - GRIP_SIZE
         gy = self.y + self.h - GRIP_SIZE
-        return sx >= gx and sy >= gy
+        return gx <= mx < self.x + self.w and gy <= my < self.y + self.h
 
 
 # ===================================================================
-# Menu Bar
+# Menu
 # ===================================================================
 
 @dataclass
@@ -561,7 +522,6 @@ class MenuItem:
     separator: bool = False
     enabled: bool = True
 
-
 @dataclass
 class Menu:
     label: str
@@ -569,64 +529,97 @@ class Menu:
 
 
 # ===================================================================
-# AES — Application Environment Services
+# Desktop icon (on the wallpaper)
+# ===================================================================
+
+@dataclass
+class DesktopIcon:
+    """An icon on the desktop background."""
+    label: str
+    icon_name: str
+    action: Optional[Callable] = None
+    grid_row: int = 0
+    grid_col: int = 0
+
+
+# ===================================================================
+# AES — Application Environment Services (Window Manager)
 # ===================================================================
 
 class AES:
     """Crystal Desktop window manager.
 
-    Manages windows, z-order, menu bar, focus, drag operations.
-    All rendering goes through a VDI instance.
+    Manages windows, menus, taskbar, desktop icons, and the global
+    event loop.  Integrates the virtual filesystem and icon system.
     """
 
     def __init__(self, vdi: VDI):
         self.vdi = vdi
-        self._windows: list[Window] = []   # z-order: last = topmost
-        self._next_wid = 1
+
+        # Virtual filesystem
+        self.vfs = VFS()
+        self.vfs.populate_default()
+
+        # Scrap (clipboard)
+        self.scrap = Scrap()
+
+        # Resource database
+        self.resources: Optional[ResourceDB] = None
+
+        # Window management
+        self._windows: list[Window] = []
         self._focused: Optional[Window] = None
+        self._next_wid = 1
+
+        # Drag / resize state
         self._dragging: Optional[Window] = None
-        self._drag_offset = (0, 0)
+        self._drag_offset: tuple[int, int] = (0, 0)
         self._resizing: Optional[Window] = None
-        self._resize_offset = (0, 0)
-        self._menu_open: int = -1          # index of open top-level menu
-        self._menu_highlight: int = -1     # highlighted item in open menu
+        self._resize_offset: tuple[int, int] = (0, 0)
+
+        # Menus
+        self._system_menus: list[Menu] = [
+            Menu("Crystal", [
+                MenuItem("About Crystal Desktop",
+                         callback=self._show_about),
+            ]),
+        ]
+        self._menu_open: int = -1
+        self._menu_highlight: int = -1
+
+        # Desktop icons
+        self._desktop_icons: list[DesktopIcon] = []
+
+        # Taskbar state
+        self._taskbar_buttons: list[Window] = []   # refreshed each redraw
+
+        # Runtime
         self._running = True
         self._dirty = True
 
-        # Scrap (clipboard) system
-        self.scrap = Scrap()
-
-        # System menu (always present)
-        self._system_menus: list[Menu] = [
-            Menu("Crystal", [
-                MenuItem("About Crystal Desktop...",
-                         callback=lambda: self._show_about()),
-                MenuItem("", separator=True),
-            ]),
-        ]
-
-        # Desktop background pattern
-        self._init_desktop_pattern()
-
-    def _init_desktop_pattern(self) -> None:
-        """No-op — palette-free system, colors are direct RGB."""
-        pass
+        # Double-click detection for desktop icons
+        self._last_desktop_click_time: float = 0.0
+        self._last_desktop_click_pos: tuple[int, int] = (0, 0)
+        self._last_desktop_click_idx: int = -1
 
     # ------------------------------------------------------------------
-    # Window management
+    # Window CRUD
     # ------------------------------------------------------------------
 
     def create_window(self, title: str, x: int, y: int, w: int, h: int,
                       flags: int = WIN_CLOSEABLE | WIN_MOVEABLE | WIN_RESIZABLE,
-                      **kwargs) -> Window:
+                      on_redraw: Callable | None = None,
+                      on_click: Callable | None = None,
+                      on_key: Callable | None = None,
+                      on_close: Callable | None = None,
+                      on_resize: Callable | None = None,
+                      menu: list[Menu] | None = None) -> Window:
         """Create and register a new window."""
-        win = Window(
-            wid=self._next_wid,
-            title=title,
-            x=x, y=y, w=w, h=h,
-            flags=flags,
-            **kwargs,
-        )
+        win = Window(wid=self._next_wid, title=title,
+                     x=x, y=y, w=w, h=h, flags=flags,
+                     on_redraw=on_redraw, on_click=on_click,
+                     on_key=on_key, on_close=on_close,
+                     on_resize=on_resize, menu=menu)
         self._next_wid += 1
         self._windows.append(win)
         self._focused = win
@@ -634,10 +627,9 @@ class AES:
         return win
 
     def close_window(self, win: Window) -> None:
-        """Close and remove a window."""
-        if win.on_close:
-            if win.on_close(win) is False:
-                return  # close was cancelled
+        """Close (remove) a window.  Calls on_close; if it returns False, cancel."""
+        if win.on_close and win.on_close(win) is False:
+            return
         if win in self._windows:
             self._windows.remove(win)
         if self._focused is win:
@@ -645,69 +637,120 @@ class AES:
         self._dirty = True
 
     def raise_window(self, win: Window) -> None:
-        """Bring a window to the top of the z-order."""
+        """Bring window to front."""
         if win in self._windows:
             self._windows.remove(win)
             self._windows.append(win)
-            self._focused = win
-            self._dirty = True
+        self._focused = win
+        self._dirty = True
 
     def lower_window(self, win: Window) -> None:
-        """Send a window to the bottom of the z-order."""
+        """Send window to back."""
         if win in self._windows:
             self._windows.remove(win)
             self._windows.insert(0, win)
-            self._dirty = True
+        if self._focused is win and self._windows:
+            self._focused = self._windows[-1]
+        self._dirty = True
 
-    def find_window_at(self, sx: int, sy: int) -> Optional[Window]:
-        """Find the topmost window at screen coordinates."""
+    def find_window_at(self, sx: int, sy: int) -> Window | None:
+        """Find topmost visible, non-minimized window at screen position."""
         for win in reversed(self._windows):
-            if win.visible and win.contains(sx, sy):
+            if win.visible and not win.minimized and win.contains(sx, sy):
                 return win
         return None
+
+    # ------------------------------------------------------------------
+    # Minimize / Maximize / Restore
+    # ------------------------------------------------------------------
+
+    def minimize_window(self, win: Window) -> None:
+        """Minimize a window (hide, show in taskbar)."""
+        win.minimized = True
+        if self._focused is win:
+            # Focus next visible window
+            self._focused = None
+            for w in reversed(self._windows):
+                if w.visible and not w.minimized:
+                    self._focused = w
+                    break
+        self._dirty = True
+
+    def maximize_window(self, win: Window) -> None:
+        """Toggle maximize: fill work area or restore."""
+        if win.maximized:
+            self.restore_window(win)
+        else:
+            win._pre_max_rect = (win.x, win.y, win.w, win.h)
+            win.x = 0
+            win.y = MENU_BAR_H
+            win.w = self.vdi.width
+            win.h = self.vdi.height - MENU_BAR_H - TASKBAR_H
+            win.maximized = True
+            if win.on_resize:
+                win.on_resize(win, win.w, win.h)
+            self._dirty = True
+
+    def restore_window(self, win: Window) -> None:
+        """Restore a minimized or maximized window."""
+        if win.maximized and win._pre_max_rect:
+            win.x, win.y, win.w, win.h = win._pre_max_rect
+            win.maximized = False
+            if win.on_resize:
+                win.on_resize(win, win.w, win.h)
+        win.minimized = False
+        self.raise_window(win)
+        self._dirty = True
 
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
 
     def redraw(self) -> None:
-        """Redraw the entire desktop."""
+        """Full desktop redraw."""
         vdi = self.vdi
 
-        # 1. Desktop background — smooth vertical gradient
+        # 1. Desktop background gradient
         vdi.grad_rect(0, 0, vdi.width, vdi.height,
-                       Colors.DESKTOP_BG, Colors.DESKTOP_BG_END,
-                       GRAD_VERTICAL)
+                      Colors.DESKTOP_BG, Colors.DESKTOP_BG_END,
+                      GRAD_VERTICAL)
 
-        # 2. Windows (bottom to top) — draw shadows first, then windows
+        # 2. Desktop icons
+        self._draw_desktop_icons()
+
+        # 3. Window shadows (non-minimized)
         for win in self._windows:
-            if win.visible:
+            if win.visible and not win.minimized:
                 vdi.shadow_rect(win.x, win.y, win.w, win.h,
-                                 radius=6, alpha=Colors.SHADOW_ALPHA)
+                                radius=6, alpha=Colors.SHADOW_ALPHA)
 
+        # 4. Windows (bottom to top, non-minimized)
         for win in self._windows:
-            if win.visible:
+            if win.visible and not win.minimized:
                 self._draw_window(win)
 
-        # 3. Menu bar (on top of everything)
+        # 5. Menu bar (on top of everything)
         self._draw_menu_bar()
 
-        # 4. Open dropdown menu
+        # 6. Open dropdown menu
         if self._menu_open >= 0:
             self._draw_dropdown()
+
+        # 7. Taskbar (on top of everything)
+        self._draw_taskbar()
 
         vdi.present()
         self._dirty = False
 
     def _draw_window(self, win: Window) -> None:
-        """Draw a single window with modern retro-futuristic decorations."""
+        """Draw a single window with modern decorations."""
         vdi = self.vdi
         is_active = (win is self._focused)
 
-        # Outer border (soft dark, not hard black)
+        # Outer border
         vdi.fill_rect(win.x, win.y, win.w, win.h, Colors.WINDOW_BORDER)
 
-        # Title bar background — gradient
+        # Title bar gradient
         if is_active:
             vdi.grad_rect(win.x + 1, win.y + 1,
                           win.w - 2, TITLE_BAR_H - 1,
@@ -721,25 +764,55 @@ class AES:
                           Colors.TITLE_BAR_INACTIVE_END,
                           GRAD_VERTICAL)
 
-        # Close button — red circle with white ×
+        # Close button — red circle with × (left side)
         if win.flags & WIN_CLOSEABLE:
             btn_cx = win.x + 3 + CLOSE_BTN_W // 2
             btn_cy = win.y + 2 + CLOSE_BTN_H // 2
             btn_r = min(CLOSE_BTN_W, CLOSE_BTN_H) // 2 - 1
             vdi.fill_circle(btn_cx, btn_cy, btn_r, Colors.CLOSE_BTN_BG)
-            # White × mark
             xr = btn_r - 3
             vdi.draw_line(btn_cx - xr, btn_cy - xr,
-                           btn_cx + xr, btn_cy + xr, Colors.CLOSE_BTN_X)
+                          btn_cx + xr, btn_cy + xr, Colors.CLOSE_BTN_X)
             vdi.draw_line(btn_cx + xr, btn_cy - xr,
-                           btn_cx - xr, btn_cy + xr, Colors.CLOSE_BTN_X)
+                          btn_cx - xr, btn_cy + xr, Colors.CLOSE_BTN_X)
 
-        # Title text with drop shadow
+        # Maximize button — green circle with □ (right side)
+        if win.flags & WIN_MAXIMIZABLE:
+            mbx = win.x + win.w - 3 - MAX_BTN_W
+            mby = win.y + (TITLE_BAR_H - MAX_BTN_H) // 2
+            mcx = mbx + MAX_BTN_W // 2
+            mcy = mby + MAX_BTN_H // 2
+            mr = min(MAX_BTN_W, MAX_BTN_H) // 2 - 1
+            vdi.fill_circle(mcx, mcy, mr, Colors.MAX_BTN_BG)
+            # Draw □ or filled indicator
+            sr = mr - 3
+            if win.maximized:
+                vdi.fill_rect(mcx - sr, mcy - sr, sr * 2, sr * 2,
+                              Colors.MAX_BTN_FG)
+            else:
+                for dx in range(-sr, sr + 1):
+                    vdi.fb[(mcy - sr) * vdi.width + mcx + dx] = Colors.MAX_BTN_FG
+                    vdi.fb[(mcy + sr) * vdi.width + mcx + dx] = Colors.MAX_BTN_FG
+                for dy in range(-sr, sr + 1):
+                    vdi.fb[(mcy + dy) * vdi.width + mcx - sr] = Colors.MAX_BTN_FG
+                    vdi.fb[(mcy + dy) * vdi.width + mcx + sr] = Colors.MAX_BTN_FG
+
+        # Minimize button — yellow circle with — (left of maximize)
+        if win.flags & WIN_MINIMIZABLE:
+            nbx = win.x + win.w - 3 - MAX_BTN_W - 4 - MIN_BTN_W
+            nby = win.y + (TITLE_BAR_H - MIN_BTN_H) // 2
+            ncx = nbx + MIN_BTN_W // 2
+            ncy = nby + MIN_BTN_H // 2
+            nr = min(MIN_BTN_W, MIN_BTN_H) // 2 - 1
+            vdi.fill_circle(ncx, ncy, nr, Colors.MIN_BTN_BG)
+            lr = nr - 3
+            vdi.draw_line(ncx - lr, ncy, ncx + lr, ncy, Colors.MIN_BTN_FG)
+
+        # Title text (centered, avoiding buttons)
         cw_f = vdi.font.char_w
         ch_f = vdi.font.char_h
         text_x = win.x + (win.w - len(win.title) * cw_f) // 2
         text_y = win.y + (TITLE_BAR_H - ch_f) // 2
-        # Shadow first (1px offset down-right)
         vdi.draw_string(text_x + 1, text_y + 1, win.title,
                         Colors.TITLE_TEXT_SHADOW, BG_TRANSPARENT)
         vdi.draw_string(text_x, text_y, win.title,
@@ -749,13 +822,13 @@ class AES:
         cx, cy, cw, ch = win.client_rect()
         vdi.fill_rect(cx, cy, cw, ch, Colors.WINDOW_BG)
 
-        # Subtle separator line between title bar and content
+        # Separator between title and content
         vdi.draw_line(win.x + 1, win.y + TITLE_BAR_H,
-                       win.x + win.w - 2, win.y + TITLE_BAR_H,
-                       Colors.WINDOW_BORDER)
+                      win.x + win.w - 2, win.y + TITLE_BAR_H,
+                      Colors.WINDOW_BORDER)
 
-        # Resize grip — dot pattern (bottom-right corner)
-        if win.flags & WIN_RESIZABLE:
+        # Resize grip
+        if win.flags & WIN_RESIZABLE and not win.maximized:
             gx = win.x + win.w - GRIP_SIZE
             gy = win.y + win.h - GRIP_SIZE
             for row in range(3):
@@ -772,23 +845,141 @@ class AES:
                     if 0 <= px + 1 < vdi.width and 0 <= py + 1 < vdi.height:
                         vdi.fb[(py + 1) * vdi.width + px + 1] = Colors.GRIP_DOT
 
-        # Draw window content
+        # Window content callback
         if win.on_redraw:
             win.on_redraw(vdi, win)
 
-    def _draw_menu_bar(self) -> None:
-        """Draw the global menu bar — dark, modern."""
+    # ------------------------------------------------------------------
+    # Taskbar
+    # ------------------------------------------------------------------
+
+    def _draw_taskbar(self) -> None:
+        """Draw the taskbar at the bottom of the screen."""
         vdi = self.vdi
+        ty = vdi.height - TASKBAR_H
+        cw_f = vdi.font.char_w
+        ch_f = vdi.font.char_h
 
-        # Menu bar gradient background
+        # Taskbar background
+        vdi.grad_rect(0, ty, vdi.width, TASKBAR_H,
+                      Colors.TASKBAR_BG, Colors.TASKBAR_BG_END,
+                      GRAD_VERTICAL)
+        # Top separator
+        vdi.draw_line(0, ty, vdi.width - 1, ty, Colors.TASKBAR_SEP)
+
+        # Crystal button (left)
+        crystal_w = 8 * cw_f + 12
+        vdi.grad_rect(2, ty + 2, crystal_w, TASKBAR_H - 4,
+                      Colors.MENU_HIGHLIGHT, 0x224466, GRAD_VERTICAL)
+        vdi.draw_string(8, ty + (TASKBAR_H - ch_f) // 2,
+                        "Crystal", Colors.WHITE, BG_TRANSPARENT)
+
+        # Window buttons
+        bx = crystal_w + 8
+        self._taskbar_buttons = []
+        for win in self._windows:
+            if not win.visible:
+                continue
+            max_chars = 16
+            btn_label = win.title[:max_chars]
+            btn_w = len(btn_label) * cw_f + 12
+            if bx + btn_w > vdi.width - 90:
+                break
+
+            bg = Colors.TASKBAR_BTN_ACT if win is self._focused and not win.minimized else Colors.TASKBAR_BTN_BG
+            vdi.fill_rect(bx, ty + 3, btn_w, TASKBAR_H - 6, bg)
+            # Border
+            vdi.draw_line(bx, ty + 3, bx + btn_w - 1, ty + 3,
+                          Colors.TASKBAR_SEP)
+            vdi.draw_line(bx, ty + 3, bx, ty + TASKBAR_H - 4,
+                          Colors.TASKBAR_SEP)
+            vdi.draw_line(bx + btn_w - 1, ty + 3,
+                          bx + btn_w - 1, ty + TASKBAR_H - 4,
+                          Colors.TASKBAR_SEP)
+            vdi.draw_line(bx, ty + TASKBAR_H - 4,
+                          bx + btn_w - 1, ty + TASKBAR_H - 4,
+                          Colors.TASKBAR_SEP)
+
+            fg = Colors.WHITE if win is self._focused else Colors.TASKBAR_BTN_TXT
+            if win.minimized:
+                fg = Colors.DARK_GRAY
+            vdi.draw_string(bx + 6, ty + (TASKBAR_H - ch_f) // 2,
+                            btn_label, fg, BG_TRANSPARENT)
+            self._taskbar_buttons.append(win)
+            bx += btn_w + 3
+
+        # Clock (right side)
+        time_str = time.strftime("%H:%M")
+        tw = len(time_str) * cw_f
+        vdi.draw_string(vdi.width - tw - 8,
+                        ty + (TASKBAR_H - ch_f) // 2,
+                        time_str, Colors.TASKBAR_CLOCK, BG_TRANSPARENT)
+
+    # ------------------------------------------------------------------
+    # Desktop icons
+    # ------------------------------------------------------------------
+
+    def _draw_desktop_icons(self) -> None:
+        """Draw desktop shortcut icons."""
+        vdi = self.vdi
+        cw_f = vdi.font.char_w
+        ch_f = vdi.font.char_h
+
+        cell_w = 80
+        cell_h = 72
+        start_x = 16
+        start_y = MENU_BAR_H + 12
+
+        for idx, di in enumerate(self._desktop_icons):
+            ix = start_x + di.grid_col * cell_w
+            iy = start_y + di.grid_row * cell_h
+
+            # Get icon
+            icon = get_icon(di.icon_name)
+            if icon:
+                # Draw icon at 2x (32x32)
+                icon_x = ix + (cell_w - 32) // 2
+                icon_y = iy
+                icon.draw(vdi, icon_x, icon_y, scale=2)
+
+            # Label below icon
+            label = di.label
+            if len(label) * cw_f > cell_w:
+                max_ch = cell_w // cw_f
+                label = label[:max_ch - 1] + "\u2026"
+            lx = ix + (cell_w - len(label) * cw_f) // 2
+            ly = iy + 36
+            vdi.draw_string(lx, ly, label,
+                            Colors.DESKTOP_ICON_TXT, BG_TRANSPARENT)
+
+    def _desktop_icon_hit(self, sx: int, sy: int) -> int:
+        """Return index of desktop icon at screen position, or -1."""
+        cw_f = self.vdi.font.char_w
+        cell_w = 80
+        cell_h = 72
+        start_x = 16
+        start_y = MENU_BAR_H + 12
+
+        for idx, di in enumerate(self._desktop_icons):
+            ix = start_x + di.grid_col * cell_w
+            iy = start_y + di.grid_row * cell_h
+            if ix <= sx < ix + cell_w and iy <= sy < iy + cell_h:
+                return idx
+        return -1
+
+    # ------------------------------------------------------------------
+    # Menu bar
+    # ------------------------------------------------------------------
+
+    def _draw_menu_bar(self) -> None:
+        """Draw the global menu bar."""
+        vdi = self.vdi
         vdi.grad_rect(0, 0, vdi.width, MENU_BAR_H,
-                       Colors.MENU_BAR_BG, Colors.MENU_BAR_BG_END,
-                       GRAD_VERTICAL)
-        # Subtle bottom separator
+                      Colors.MENU_BAR_BG, Colors.MENU_BAR_BG_END,
+                      GRAD_VERTICAL)
         vdi.draw_line(0, MENU_BAR_H - 1, vdi.width - 1, MENU_BAR_H - 1,
-                       Colors.MENU_BAR_SEPARATOR)
+                      Colors.MENU_BAR_SEPARATOR)
 
-        # Draw menu labels
         x = 8
         menus = self._get_active_menus()
         cw_f = vdi.font.char_w
@@ -797,12 +988,12 @@ class AES:
             label_w = len(menu.label) * cw_f + 12
             if i == self._menu_open:
                 vdi.fill_rect(x - 4, 1, label_w, MENU_BAR_H - 2,
-                               Colors.MENU_HIGHLIGHT)
+                              Colors.MENU_HIGHLIGHT)
                 vdi.draw_string(x, (MENU_BAR_H - ch_f) // 2, menu.label,
-                                 Colors.MENU_HI_TEXT, Colors.MENU_HIGHLIGHT)
+                                Colors.MENU_HI_TEXT, Colors.MENU_HIGHLIGHT)
             else:
                 vdi.draw_string(x, (MENU_BAR_H - ch_f) // 2, menu.label,
-                                 Colors.MENU_BAR_TEXT, BG_TRANSPARENT)
+                                Colors.MENU_BAR_TEXT, BG_TRANSPARENT)
             x += label_w
 
     def _draw_dropdown(self) -> None:
@@ -811,7 +1002,6 @@ class AES:
         menus = self._get_active_menus()
         if self._menu_open < 0 or self._menu_open >= len(menus):
             return
-
         menu = menus[self._menu_open]
         if not menu.items:
             return
@@ -819,12 +1009,10 @@ class AES:
         cw_f = vdi.font.char_w
         ch_f = vdi.font.char_h
 
-        # Calculate dropdown position
         x = 8
         for i in range(self._menu_open):
             x += len(menus[i].label) * cw_f + 12
 
-        # Dropdown dimensions
         max_label_w = max(len(item.label) for item in menu.items
                           if not item.separator) if menu.items else 8
         drop_w = max_label_w * cw_f + 16
@@ -833,51 +1021,45 @@ class AES:
         drop_x = x - 4
         drop_y = MENU_BAR_H
 
-        # Background and border — dark dropdown
-        vdi.shadow_rect(drop_x, drop_y, drop_w, drop_h,
-                         radius=4, alpha=60)
+        vdi.shadow_rect(drop_x, drop_y, drop_w, drop_h, radius=4, alpha=60)
         vdi.fill_rect(drop_x, drop_y, drop_w, drop_h, Colors.DROPDOWN_BG)
-        # Border
         vdi.draw_line(drop_x, drop_y, drop_x + drop_w - 1, drop_y,
-                       Colors.DROPDOWN_BORDER)
+                      Colors.DROPDOWN_BORDER)
         vdi.draw_line(drop_x, drop_y, drop_x, drop_y + drop_h - 1,
-                       Colors.DROPDOWN_BORDER)
+                      Colors.DROPDOWN_BORDER)
         vdi.draw_line(drop_x + drop_w - 1, drop_y,
-                       drop_x + drop_w - 1, drop_y + drop_h - 1,
-                       Colors.DROPDOWN_BORDER)
+                      drop_x + drop_w - 1, drop_y + drop_h - 1,
+                      Colors.DROPDOWN_BORDER)
         vdi.draw_line(drop_x, drop_y + drop_h - 1,
-                       drop_x + drop_w - 1, drop_y + drop_h - 1,
-                       Colors.DROPDOWN_BORDER)
+                      drop_x + drop_w - 1, drop_y + drop_h - 1,
+                      Colors.DROPDOWN_BORDER)
 
-        # Items
         iy = drop_y + 2
         for idx, item in enumerate(menu.items):
             if item.separator:
                 vdi.draw_line(drop_x + 4, iy + 3,
-                               drop_x + drop_w - 5, iy + 3,
-                               Colors.DROPDOWN_SEPARATOR)
+                              drop_x + drop_w - 5, iy + 3,
+                              Colors.DROPDOWN_SEPARATOR)
                 iy += 8
             else:
                 if idx == self._menu_highlight:
                     vdi.fill_rect(drop_x + 1, iy, drop_w - 2, ch_f + 4,
-                                   Colors.MENU_HIGHLIGHT)
+                                  Colors.MENU_HIGHLIGHT)
                     vdi.draw_string(drop_x + 8, iy + 2, item.label,
-                                     Colors.MENU_HI_TEXT, Colors.MENU_HIGHLIGHT)
+                                    Colors.MENU_HI_TEXT, Colors.MENU_HIGHLIGHT)
                 else:
                     fg = Colors.DROPDOWN_TEXT if item.enabled else Colors.DARK_GRAY
                     vdi.draw_string(drop_x + 8, iy + 2, item.label,
-                                     fg, Colors.DROPDOWN_BG)
+                                    fg, Colors.DROPDOWN_BG)
                 iy += ch_f + 4
 
     def _get_active_menus(self) -> list[Menu]:
-        """Return the current menu bar items (system + focused app menus)."""
         menus = list(self._system_menus)
         if self._focused and self._focused.menu:
             menus.extend(self._focused.menu)
         return menus
 
     def _menu_hit_test(self, sx: int, sy: int) -> int:
-        """Return index of menu label at screen position, or -1."""
         if sy >= MENU_BAR_H:
             return -1
         x = 8
@@ -891,18 +1073,15 @@ class AES:
         return -1
 
     def _dropdown_hit_test(self, sx: int, sy: int) -> int:
-        """Return index of menu item under cursor, or -1."""
         menus = self._get_active_menus()
         if self._menu_open < 0 or self._menu_open >= len(menus):
             return -1
-
         menu = menus[self._menu_open]
         cw_f = self.vdi.font.char_w
         ch_f = self.vdi.font.char_h
         x = 8
         for i in range(self._menu_open):
             x += len(menus[i].label) * cw_f + 12
-
         max_label_w = max(len(item.label) for item in menu.items
                           if not item.separator) if menu.items else 8
         drop_w = max_label_w * cw_f + 16
@@ -931,7 +1110,6 @@ class AES:
         if evt_type == EVT_QUIT:
             self._running = False
             return
-
         if evt_type == EVT_MOUSE_DOWN:
             mx, my = data1, data2 & 0xFFFF
             button = (data2 >> 16) & 0xFF
@@ -949,19 +1127,19 @@ class AES:
 
     def _on_mouse_down(self, mx: int, my: int, button: int) -> None:
         """Handle mouse button press."""
-        # Check menu bar first
+        # 1. Menu bar
         if my < MENU_BAR_H:
             idx = self._menu_hit_test(mx, my)
             if idx >= 0:
                 if self._menu_open == idx:
-                    self._menu_open = -1  # toggle off
+                    self._menu_open = -1
                 else:
                     self._menu_open = idx
                     self._menu_highlight = -1
                 self._dirty = True
                 return
 
-        # Check dropdown menu
+        # 2. Dropdown menu
         if self._menu_open >= 0:
             item_idx = self._dropdown_hit_test(mx, my)
             if item_idx >= 0:
@@ -978,9 +1156,18 @@ class AES:
                 self._menu_highlight = -1
                 self._dirty = True
 
-        # Find window under cursor
+        # 3. Taskbar area
+        if my >= self.vdi.height - TASKBAR_H:
+            self._on_taskbar_click(mx, my)
+            return
+
+        # 4. Find window under cursor
         win = self.find_window_at(mx, my)
         if win is None:
+            # Desktop icon?
+            icon_idx = self._desktop_icon_hit(mx, my)
+            if icon_idx >= 0:
+                self._on_desktop_icon_click(icon_idx, mx, my)
             return
 
         # Raise and focus
@@ -993,14 +1180,25 @@ class AES:
             self.close_window(win)
             return
 
+        # Minimize button?
+        if win.in_minimize_button(mx, my):
+            self.minimize_window(win)
+            return
+
+        # Maximize button?
+        if win.in_maximize_button(mx, my):
+            self.maximize_window(win)
+            return
+
         # Title bar drag?
         if win.in_title_bar(mx, my) and (win.flags & WIN_MOVEABLE):
-            self._dragging = win
-            self._drag_offset = (mx - win.x, my - win.y)
+            if not win.maximized:
+                self._dragging = win
+                self._drag_offset = (mx - win.x, my - win.y)
             return
 
         # Resize grip?
-        if win.in_resize_grip(mx, my):
+        if win.in_resize_grip(mx, my) and not win.maximized:
             self._resizing = win
             self._resize_offset = (mx - win.w, my - win.h)
             return
@@ -1012,7 +1210,6 @@ class AES:
                 win.on_click(win, mx - cx, my - cy, button)
 
     def _on_mouse_up(self, mx: int, my: int, button: int) -> None:
-        """Handle mouse button release."""
         if self._dragging:
             self._dragging = None
             self._dirty = True
@@ -1021,12 +1218,12 @@ class AES:
             self._dirty = True
 
     def _on_mouse_move(self, mx: int, my: int) -> None:
-        """Handle mouse movement."""
         if self._dragging:
             win = self._dragging
             ox, oy = self._drag_offset
             win.x = max(0, min(mx - ox, self.vdi.width - 20))
-            win.y = max(MENU_BAR_H, min(my - oy, self.vdi.height - 20))
+            win.y = max(MENU_BAR_H, min(my - oy,
+                                        self.vdi.height - TASKBAR_H - 20))
             self._dirty = True
             return
 
@@ -1036,15 +1233,14 @@ class AES:
             new_w = max(MIN_WIN_W, mx - ox)
             new_h = max(MIN_WIN_H, my - oy)
             win.w = min(new_w, self.vdi.width - win.x)
-            win.h = min(new_h, self.vdi.height - win.y)
+            win.h = min(new_h, self.vdi.height - TASKBAR_H - win.y)
             if win.on_resize:
                 win.on_resize(win, win.w, win.h)
             self._dirty = True
             return
 
-        # Update menu highlight if dropdown is open
+        # Menu highlight
         if self._menu_open >= 0:
-            # Check if mouse moved to a different top-level menu
             if my < MENU_BAR_H:
                 idx = self._menu_hit_test(mx, my)
                 if idx >= 0 and idx != self._menu_open:
@@ -1052,28 +1248,77 @@ class AES:
                     self._menu_highlight = -1
                     self._dirty = True
                     return
-
             item_idx = self._dropdown_hit_test(mx, my)
             if item_idx != self._menu_highlight:
                 self._menu_highlight = item_idx
                 self._dirty = True
 
-        # Update cursor position
         self.vdi.set_cursor(mx, my, True)
 
     def _on_key_down(self, key: int, mod: int) -> None:
-        """Handle key press — dispatch to focused window."""
         if self._focused and self._focused.on_key:
             self._focused.on_key(self._focused, key, mod)
+
+    def _on_taskbar_click(self, mx: int, my: int) -> None:
+        """Handle click on the taskbar."""
+        cw_f = self.vdi.font.char_w
+        crystal_w = 8 * cw_f + 12
+
+        # Crystal button click → toggle Crystal menu
+        if mx < crystal_w + 4:
+            if self._menu_open == 0:
+                self._menu_open = -1
+            else:
+                self._menu_open = 0
+                self._menu_highlight = -1
+            self._dirty = True
+            return
+
+        # Window buttons
+        bx = crystal_w + 8
+        for win in self._windows:
+            if not win.visible:
+                continue
+            max_chars = 16
+            btn_label = win.title[:max_chars]
+            btn_w = len(btn_label) * cw_f + 12
+            if bx + btn_w > self.vdi.width - 90:
+                break
+            if bx <= mx < bx + btn_w:
+                if win.minimized:
+                    self.restore_window(win)
+                elif win is self._focused:
+                    self.minimize_window(win)
+                else:
+                    self.raise_window(win)
+                return
+            bx += btn_w + 3
+
+    def _on_desktop_icon_click(self, idx: int, mx: int, my: int) -> None:
+        """Handle click on a desktop icon — double-click to activate."""
+        now = time.time()
+        if (self._last_desktop_click_idx == idx and
+                now - self._last_desktop_click_time < 0.4 and
+                abs(mx - self._last_desktop_click_pos[0]) < 5 and
+                abs(my - self._last_desktop_click_pos[1]) < 5):
+            # Double-click → launch
+            di = self._desktop_icons[idx]
+            if di.action:
+                di.action()
+            self._last_desktop_click_idx = -1
+        else:
+            self._last_desktop_click_idx = idx
+            self._last_desktop_click_time = now
+            self._last_desktop_click_pos = (mx, my)
+        self._dirty = True
 
     # ------------------------------------------------------------------
     # About dialog
     # ------------------------------------------------------------------
 
     def _show_about(self) -> None:
-        """Show the About Crystal Desktop dialog."""
-        w = 280
-        h = 140
+        w = 320
+        h = 160
         x = (self.vdi.width - w) // 2
         y = (self.vdi.height - h) // 2
 
@@ -1081,13 +1326,12 @@ class AES:
             cx, cy, cw, ch = win.client_rect()
             cw_f = vdi.font.char_w
             ch_f = vdi.font.char_h
-            # Dark background for about
             vdi.fill_rect(cx, cy, cw, ch, Colors.DROPDOWN_BG)
             lines = [
-                "Crystal Desktop v1.0",
+                "Crystal Desktop v2.0",
                 "",
                 "LM-1 List Machine",
-                "Window Manager",
+                "with Virtual Filesystem",
                 "",
                 "Click to close",
             ]
@@ -1097,9 +1341,9 @@ class AES:
                 fg = Colors.CYAN if i == 0 else Colors.DROPDOWN_TEXT
                 vdi.draw_string(tx, ty, line, fg, Colors.DROPDOWN_BG)
 
-        win = self.create_window("About", x, y, w, h,
-                                  flags=WIN_CLOSEABLE | WIN_MOVEABLE,
-                                  on_redraw=draw_about)
+        self.create_window("About", x, y, w, h,
+                           flags=WIN_CLOSEABLE | WIN_MOVEABLE,
+                           on_redraw=draw_about)
         self._dirty = True
 
     # ------------------------------------------------------------------
@@ -1109,18 +1353,14 @@ class AES:
     def run(self, fps: int = 30) -> None:
         """Run the desktop event loop."""
         import pygame
-
-        frame_time = 1.0 / fps
         clock = pygame.time.Clock()
 
         while self._running:
-            # Poll events
             evt_type, d1, d2 = self.vdi.read_event()
             while evt_type != EVT_NONE:
                 self.handle_event(evt_type, d1, d2)
                 evt_type, d1, d2 = self.vdi.read_event()
 
-            # Redraw if needed
             if self._dirty:
                 self.redraw()
 
@@ -1134,13 +1374,13 @@ class AES:
 # ===================================================================
 
 class TerminalCrystallite:
-    """A simple terminal/REPL window."""
+    """A terminal/REPL window with Lisp evaluation."""
 
     def __init__(self, aes: AES, x: int = 60, y: int = 50,
                  w: int = 480, h: int = 320):
         self.aes = aes
         self.lines: list[str] = ["Crystal Terminal v1.0",
-                                   "Type 'help' for commands.", ""]
+                                  "Type 'help' for commands.", ""]
         self.input_buf: str = ""
         self.prompt = "> "
         self.cursor_on = True
@@ -1153,11 +1393,15 @@ class TerminalCrystallite:
             'quit': lambda: setattr(aes, '_running', False),
             'hello': lambda: self._output("Hello from Crystal Desktop!"),
             'time': self._cmd_time,
+            'ls': self._cmd_ls,
+            'cat': self._cmd_cat,
+            'pwd': self._cmd_pwd,
         }
 
         self.win = aes.create_window(
             "Terminal", x, y, w, h,
-            flags=WIN_CLOSEABLE | WIN_MOVEABLE | WIN_RESIZABLE,
+            flags=WIN_CLOSEABLE | WIN_MOVEABLE | WIN_RESIZABLE
+                  | WIN_MAXIMIZABLE | WIN_MINIMIZABLE,
             on_redraw=self._redraw,
             on_key=self._on_key,
             menu=[
@@ -1166,32 +1410,30 @@ class TerminalCrystallite:
                 ]),
             ],
         )
+        self.win._cryst_type = 'terminal'
+        self._cwd = "/"
 
     def _redraw(self, vdi: VDI, win: Window) -> None:
         cx, cy, cw, ch = win.client_rect()
         cw_f = vdi.font.char_w
         ch_f = vdi.font.char_h
-        # Fill background
         vdi.fill_rect(cx, cy, cw, ch, Colors.BLACK)
 
-        # Calculate visible lines
         max_lines = ch // ch_f
         display_lines = self.lines[-(max_lines - 1):]
 
-        # Draw history
         for i, line in enumerate(display_lines):
             vdi.draw_string(cx + 2, cy + 2 + i * ch_f,
-                             line[:cw // cw_f],
-                             Colors.GREEN, Colors.BLACK)
+                            line[:cw // cw_f],
+                            Colors.GREEN, Colors.BLACK)
 
-        # Draw current input line with prompt
         input_y = cy + 2 + len(display_lines) * ch_f
         input_line = self.prompt + self.input_buf
         if self.cursor_on:
             input_line += "_"
         vdi.draw_string(cx + 2, input_y,
-                         input_line[:cw // cw_f],
-                         Colors.GREEN, Colors.BLACK)
+                        input_line[:cw // cw_f],
+                        Colors.GREEN, Colors.BLACK)
 
     def _on_key(self, win: Window, key: int, mod: int) -> None:
         import pygame
@@ -1210,7 +1452,6 @@ class TerminalCrystallite:
             ch = chr(key)
             if mod & pygame.KMOD_SHIFT:
                 ch = ch.upper()
-                # Handle shift symbols
                 shift_map = {
                     '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
                     '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
@@ -1229,17 +1470,27 @@ class TerminalCrystallite:
         if not cmd:
             return
 
-        # Try built-in commands
         parts = cmd.split()
         cmd_name = parts[0].lower()
+
+        # Commands that take arguments
+        if cmd_name == 'cd' and len(parts) > 1:
+            self._cmd_cd(parts[1])
+            return
+        if cmd_name == 'ls':
+            target = parts[1] if len(parts) > 1 else None
+            self._cmd_ls(target)
+            return
+        if cmd_name == 'cat' and len(parts) > 1:
+            self._cmd_cat(parts[1])
+            return
+
         if cmd_name in self._commands:
             self._commands[cmd_name]()
         else:
-            # Try to evaluate as a simple Lisp expression
             self._eval_lisp(cmd)
 
     def _eval_lisp(self, expr: str) -> None:
-        """Simple Lisp evaluator for the terminal."""
         try:
             from .compiler import parse
             forms = parse(expr)
@@ -1250,7 +1501,6 @@ class TerminalCrystallite:
             self._output(f"Error: {e}")
 
     def _eval_form(self, form):
-        """Evaluate a Lisp form directly in Python."""
         if isinstance(form, int):
             return form
         if isinstance(form, str):
@@ -1260,7 +1510,7 @@ class TerminalCrystallite:
                 return True
             if form == 'pi':
                 return 3.14159
-            return form  # symbol
+            return form
         if isinstance(form, list):
             if not form:
                 return None
@@ -1336,6 +1586,7 @@ class TerminalCrystallite:
 
     def _cmd_help(self) -> None:
         self._output("Commands: help, clear, about, windows, quit, time")
+        self._output("         ls [path], cd <path>, cat <file>, pwd")
         self._output("Lisp: (+ 1 2), (fact 10), (list 1 2 3)")
 
     def _cmd_clear(self) -> None:
@@ -1343,11 +1594,49 @@ class TerminalCrystallite:
 
     def _cmd_windows(self) -> None:
         for win in self.aes._windows:
-            self._output(f"  [{win.wid}] {win.title} ({win.w}x{win.h})")
+            st = " [min]" if win.minimized else ""
+            self._output(f"  [{win.wid}] {win.title} ({win.w}x{win.h}){st}")
 
     def _cmd_time(self) -> None:
-        import time
         self._output(time.strftime("%Y-%m-%d %H:%M:%S"))
+
+    def _cmd_pwd(self) -> None:
+        self._output(self._cwd)
+
+    def _cmd_ls(self, path: str | None = None) -> None:
+        """List VFS directory."""
+        target = path or self._cwd
+        if not target.startswith('/'):
+            target = self._cwd.rstrip('/') + '/' + target
+        try:
+            children = self.aes.vfs.list_dir(target)
+            for node in children:
+                suffix = '/' if node.is_dir else ''
+                self._output(f"  {node.name}{suffix}")
+            if not children:
+                self._output("  (empty)")
+        except Exception as e:
+            self._output(f"ls: {e}")
+
+    def _cmd_cat(self, path: str) -> None:
+        """Display file contents from VFS."""
+        if not path.startswith('/'):
+            path = self._cwd.rstrip('/') + '/' + path
+        try:
+            text = self.aes.vfs.read_text(path)
+            self._output(text)
+        except Exception as e:
+            self._output(f"cat: {e}")
+
+    def _cmd_cd(self, path: str) -> None:
+        """Change current directory in VFS."""
+        if not path.startswith('/'):
+            path = self._cwd.rstrip('/') + '/' + path
+        try:
+            self.aes.vfs.resolve_dir(path)
+            self._cwd = _vfs_normalize(path)
+        except Exception as e:
+            self._output(f"cd: {e}")
 
 
 class ClockCrystallite:
@@ -1361,7 +1650,7 @@ class ClockCrystallite:
             flags=WIN_CLOSEABLE | WIN_MOVEABLE,
             on_redraw=self._redraw,
         )
-        # Schedule periodic updates
+        self.win._cryst_type = 'clock'
         self._update_interval = 1.0
         self._last_update = 0.0
 
@@ -1372,17 +1661,14 @@ class ClockCrystallite:
         vdi.fill_rect(cx, cy, cw, ch, Colors.DROPDOWN_BG)
         time_str = time.strftime("%H:%M:%S")
         date_str = time.strftime("%Y-%m-%d")
-        # Big time display
         tx = cx + (cw - len(time_str) * cw_f) // 2
         vdi.draw_string(tx, cy + 4, time_str, Colors.CYAN, Colors.DROPDOWN_BG)
-        # Date below
         dx = cx + (cw - len(date_str) * cw_f) // 2
         vdi.draw_string(dx, cy + 4 + ch_f + 2, date_str,
-                         Colors.DROPDOWN_TEXT, Colors.DROPDOWN_BG)
+                        Colors.DROPDOWN_TEXT, Colors.DROPDOWN_BG)
         self._last_time = time_str
 
     def tick(self) -> None:
-        """Called periodically to update the clock."""
         now = time.time()
         if now - self._last_update >= self._update_interval:
             self._last_update = now
@@ -1392,7 +1678,7 @@ class ClockCrystallite:
 
 
 class CalculatorCrystallite:
-    """A simple desktop calculator."""
+    """A desktop calculator."""
 
     def __init__(self, aes: AES, x: int = 300, y: int = 100):
         self.aes = aes
@@ -1424,21 +1710,21 @@ class CalculatorCrystallite:
                 ]),
             ],
         )
+        self.win._cryst_type = 'calculator'
 
     def _redraw(self, vdi: VDI, win: Window) -> None:
         cx, cy, cw, ch = win.client_rect()
         cw_f = vdi.font.char_w
         ch_f = vdi.font.char_h
 
-        # Calculator body background
         vdi.fill_rect(cx, cy, cw, ch, Colors.DROPDOWN_BG)
 
-        # Display field — dark inset
+        # Display
         vdi.fill_rect(cx + 4, cy + 4, cw - 8, 24, Colors.BLACK)
         vdi.draw_line(cx + 4, cy + 4, cx + cw - 5, cy + 4,
-                       Colors.DROPDOWN_BORDER)
+                      Colors.DROPDOWN_BORDER)
         vdi.draw_line(cx + 4, cy + 4, cx + 4, cy + 27,
-                       Colors.DROPDOWN_BORDER)
+                      Colors.DROPDOWN_BORDER)
         display_text = self.display[-cw // cw_f:]
         tx = cx + cw - 6 - len(display_text) * cw_f
         vdi.draw_string(tx, cy + 7, display_text, Colors.CYAN, Colors.BLACK)
@@ -1450,25 +1736,21 @@ class CalculatorCrystallite:
             for col_idx, label in enumerate(row):
                 bx = cx + pad + col_idx * (btn_w + pad)
                 by = by_start + row_idx * (btn_h + pad)
-                # Modern flat button with subtle gradient
                 vdi.grad_rect(bx, by, btn_w, btn_h,
-                               Colors.BUTTON_BG, Colors.BUTTON_BG_END,
-                               GRAD_VERTICAL)
-                # Border
+                              Colors.BUTTON_BG, Colors.BUTTON_BG_END,
+                              GRAD_VERTICAL)
                 vdi.draw_line(bx, by, bx + btn_w - 1, by, Colors.BUTTON_BORDER)
                 vdi.draw_line(bx, by, bx, by + btn_h - 1, Colors.BUTTON_BORDER)
                 vdi.draw_line(bx + btn_w - 1, by,
-                               bx + btn_w - 1, by + btn_h - 1, Colors.BUTTON_BORDER)
+                              bx + btn_w - 1, by + btn_h - 1, Colors.BUTTON_BORDER)
                 vdi.draw_line(bx, by + btn_h - 1,
-                               bx + btn_w - 1, by + btn_h - 1, Colors.BUTTON_BORDER)
-                # Label
+                              bx + btn_w - 1, by + btn_h - 1, Colors.BUTTON_BORDER)
                 lx = bx + (btn_w - len(label) * cw_f) // 2
                 ly = by + (btn_h - ch_f) // 2
                 vdi.draw_string(lx, ly, label,
-                                 Colors.BUTTON_TEXT, BG_TRANSPARENT)
+                                Colors.BUTTON_TEXT, BG_TRANSPARENT)
 
     def _on_click(self, win: Window, cx: int, cy: int, button: int) -> None:
-        """Handle click in calculator content area."""
         btn_w, btn_h, pad = 40, 32, 4
         by_start = 34
         for row_idx, row in enumerate(self._buttons):
@@ -1527,20 +1809,17 @@ class CalculatorCrystallite:
 
 
 class InspectorCrystallite:
-    """Inspector — shows window properties, z-order, and pixel info.
-
-    Displays live information about the focused window and the
-    desktop state. Useful for debugging and development.
-    """
+    """Inspector — shows window properties, z-order, pixel info, and VFS stats."""
 
     def __init__(self, aes: AES, x: int = 20, y: int = 200,
-                 w: int = 260, h: int = 260):
+                 w: int = 280, h: int = 300):
         self.aes = aes
         self._inspect_pixel = (0, 0)
         self._pixel_color = 0
         self.win = aes.create_window(
             "Inspector", x, y, w, h,
-            flags=WIN_CLOSEABLE | WIN_MOVEABLE | WIN_RESIZABLE,
+            flags=WIN_CLOSEABLE | WIN_MOVEABLE | WIN_RESIZABLE
+                  | WIN_MAXIMIZABLE | WIN_MINIMIZABLE,
             on_redraw=self._redraw,
             on_click=self._on_click,
             menu=[
@@ -1550,6 +1829,7 @@ class InspectorCrystallite:
                 ]),
             ],
         )
+        self.win._cryst_type = 'inspector'
 
     def _redraw(self, vdi: VDI, win: Window) -> None:
         cx, cy, cw, ch = win.client_rect()
@@ -1563,7 +1843,7 @@ class InspectorCrystallite:
         def _line(text: str, fg: int = Colors.DROPDOWN_TEXT):
             nonlocal y
             vdi.draw_string(cx + 4, y, text[:max_cols],
-                             fg, Colors.DROPDOWN_BG)
+                            fg, Colors.DROPDOWN_BG)
             y += ch_f + 1
 
         _line("--- Desktop ---", Colors.CYAN)
@@ -1575,7 +1855,8 @@ class InspectorCrystallite:
         _line("--- Z-Order ---", Colors.CYAN)
         for i, w in enumerate(self.aes._windows):
             marker = "*" if w is self.aes._focused else " "
-            _line(f" {marker}[{w.wid}] {w.title}")
+            st = " [min]" if w.minimized else ""
+            _line(f" {marker}[{w.wid}] {w.title}{st}")
 
         # Focused window details
         fw = self.aes._focused
@@ -1609,41 +1890,49 @@ class InspectorCrystallite:
             _line(f"Data: {data_str}")
             _line(f"History: {len(scrap.history)} items")
 
+        # VFS info
+        _line("")
+        _line("--- VFS ---", Colors.CYAN)
+        vfs = self.aes.vfs
+        file_count = 0
+        dir_count = 0
+        for _dp, dirs, files in vfs.walk("/"):
+            dir_count += len(dirs)
+            file_count += len(files)
+        _line(f"Dirs: {dir_count}  Files: {file_count}")
+
     def _on_click(self, win: Window, cx: int, cy: int, button: int) -> None:
-        """Right click could set inspect pixel (using screen coords)."""
-        # Clicking within inspector doesn't change pixel probe
         self.aes._dirty = True
 
     def set_pixel_probe(self, x: int, y: int) -> None:
-        """Set the pixel to inspect (screen coords)."""
         self._inspect_pixel = (x, y)
         self.aes._dirty = True
 
 
 class FileManagerCrystallite:
-    """Spatial file manager — folder = window, with file listing.
+    """Spatial file manager using the virtual filesystem.
 
-    Displays the contents of a directory. Each file/folder is shown
-    as a text entry with an icon character. Clicking a folder opens
-    a new FileManagerCrystallite. Clicking a file attempts to open it.
+    Displays VFS directory contents with icons.  Each folder is shown
+    with a folder icon and files with type-appropriate icons.
+    Clicking a folder opens a new window.  Clicking a file puts info
+    on the scrap. Double-click a .lisp or .txt file to open in editor.
     """
 
-    ICON_FOLDER = "\u25B6"  # ▶ (triangle for folder)
-    ICON_FILE   = "\u2022"  # • (bullet for file)
-
-    def __init__(self, aes: AES, path: str = ".",
-                 x: int = 40, y: int = 60, w: int = 320, h: int = 280):
+    def __init__(self, aes: AES, path: str = "/",
+                 x: int = 40, y: int = 60, w: int = 420, h: int = 340):
         self.aes = aes
-        self.path = os.path.abspath(path)
-        self._entries: list[tuple[str, bool]] = []  # (name, is_dir)
+        self.path = _vfs_normalize(path)
+        self._entries: list[tuple[str, bool]] = []   # (name, is_dir)
         self._scroll_offset = 0
         self._selected = -1
+        self._view_mode = 'icons'   # 'icons' or 'list'
         self._refresh()
 
-        title = os.path.basename(self.path) or self.path
+        title = self.path.rstrip('/').rsplit('/', 1)[-1] or "/"
         self.win = aes.create_window(
             title, x, y, w, h,
-            flags=WIN_CLOSEABLE | WIN_MOVEABLE | WIN_RESIZABLE,
+            flags=WIN_CLOSEABLE | WIN_MOVEABLE | WIN_RESIZABLE
+                  | WIN_MAXIMIZABLE | WIN_MINIMIZABLE,
             on_redraw=self._redraw,
             on_click=self._on_click,
             on_key=self._on_key,
@@ -1652,21 +1941,27 @@ class FileManagerCrystallite:
                     MenuItem("Refresh", callback=self._refresh),
                     MenuItem("Parent Folder", callback=self._go_parent),
                 ]),
+                Menu("View", [
+                    MenuItem("Icon View", callback=lambda: self._set_view('icons')),
+                    MenuItem("List View", callback=lambda: self._set_view('list')),
+                ]),
             ],
         )
+        self.win._cryst_type = 'file-manager'
+
+    def _set_view(self, mode: str) -> None:
+        self._view_mode = mode
+        self.aes._dirty = True
 
     def _refresh(self) -> None:
-        """Re-read directory contents."""
+        """Re-read VFS directory contents."""
         self._entries = []
         try:
-            entries = sorted(os.listdir(self.path))
-            # Directories first, then files
-            dirs = [(e, True) for e in entries
-                    if os.path.isdir(os.path.join(self.path, e))]
-            files = [(e, False) for e in entries
-                     if not os.path.isdir(os.path.join(self.path, e))]
+            children = self.aes.vfs.list_dir(self.path)
+            dirs = [(n.name, True) for n in children if n.is_dir]
+            files = [(n.name, False) for n in children if not n.is_dir]
             self._entries = dirs + files
-        except OSError:
+        except Exception:
             self._entries = []
         self._selected = -1
         if hasattr(self, 'aes'):
@@ -1676,55 +1971,208 @@ class FileManagerCrystallite:
         cx, cy, cw, ch = win.client_rect()
         cw_f = vdi.font.char_w
         ch_f = vdi.font.char_h
-        vdi.fill_rect(cx, cy, cw, ch, Colors.DROPDOWN_BG)
+        vdi.fill_rect(cx, cy, cw, ch, Colors.WINDOW_BG)
 
-        # Path bar
+        # Toolbar area (top 30px)
+        toolbar_h = 30
+        vdi.grad_rect(cx, cy, cw, toolbar_h,
+                      0x222236, 0x1E1E2E, GRAD_VERTICAL)
+        vdi.draw_line(cx, cy + toolbar_h - 1, cx + cw - 1, cy + toolbar_h - 1,
+                      Colors.WINDOW_BORDER)
+
+        # Toolbar buttons with icons
+        tbx = cx + 4
+        tby = cy + 3
+        tb_btn_h = 24
+        tb_btns = [
+            ("arrow_back", self._go_parent),
+            ("arrow_up", self._go_parent),
+            ("home", lambda: self._navigate("/users/default")),
+            ("refresh", self._refresh),
+        ]
+        for icon_name, _action in tb_btns:
+            icon = get_icon(icon_name)
+            if icon:
+                icon.draw(vdi, tbx + 4, tby + 4, scale=1)
+            tbx += 28
+
+        # View toggle icons
+        tbx += 8
+        for vname in ('view_icons', 'view_list'):
+            icon = get_icon(vname)
+            if icon:
+                is_active = (vname == 'view_icons' and self._view_mode == 'icons') or \
+                            (vname == 'view_list' and self._view_mode == 'list')
+                if is_active:
+                    vdi.fill_rect(tbx, tby, 24, 24, Colors.MENU_HIGHLIGHT)
+                icon.draw(vdi, tbx + 4, tby + 4, scale=1)
+            tbx += 28
+
+        # Path bar (below toolbar)
+        path_h = ch_f + 6
+        path_y = cy + toolbar_h
+        vdi.fill_rect(cx, path_y, cw, path_h, Colors.BLACK)
         path_text = self.path
-        max_chars = cw // cw_f - 1
+        max_chars = cw // cw_f - 2
         if len(path_text) > max_chars:
             path_text = "..." + path_text[-(max_chars - 3):]
-        vdi.fill_rect(cx, cy, cw, ch_f + 4, Colors.BLACK)
-        vdi.draw_string(cx + 4, cy + 2, path_text,
-                         Colors.CYAN, Colors.BLACK)
+        vdi.draw_string(cx + 4, path_y + 3, path_text,
+                        Colors.CYAN, Colors.BLACK)
 
-        # File listing
-        list_y = cy + ch_f + 6
-        max_lines = (ch - ch_f - 8) // (ch_f + 2)
+        # Content area
+        content_y = path_y + path_h + 2
+        content_h = ch - toolbar_h - path_h - 2 - (ch_f + 6)  # minus status bar
+
+        if self._view_mode == 'icons':
+            self._draw_icon_view(vdi, cx, content_y, cw, content_h)
+        else:
+            self._draw_list_view(vdi, cx, content_y, cw, content_h)
+
+        # Status bar
+        status_y = cy + ch - ch_f - 6
+        vdi.draw_line(cx, status_y, cx + cw - 1, status_y,
+                      Colors.WINDOW_BORDER)
+        dirs = sum(1 for _, d in self._entries if d)
+        files = len(self._entries) - dirs
+        status_text = f" {dirs} folders, {files} files"
+        vdi.draw_string(cx + 4, status_y + 3, status_text,
+                        Colors.DARK_GRAY, Colors.WINDOW_BG)
+
+    def _draw_icon_view(self, vdi, cx, cy, cw, ch):
+        """Draw entries as a grid of icons with labels."""
+        cw_f = vdi.font.char_w
+        ch_f = vdi.font.char_h
+        cell_w = 80
+        cell_h = 56
+        cols = max(1, cw // cell_w)
+        max_rows = ch // cell_h
+
+        for idx, (name, is_dir) in enumerate(self._entries):
+            row = idx // cols - self._scroll_offset
+            col = idx % cols
+            if row < 0:
+                continue
+            if row >= max_rows:
+                break
+
+            ix = cx + col * cell_w + 4
+            iy = cy + row * cell_h + 4
+
+            # Selection highlight
+            if idx == self._selected:
+                vdi.fill_rect(ix, iy, cell_w - 8, cell_h - 4,
+                              Colors.MENU_HIGHLIGHT)
+
+            # Icon (2x = 32px)
+            icon_name = 'folder' if is_dir else icon_for_name(name)
+            icon = get_icon(icon_name)
+            if icon:
+                icon_x = ix + (cell_w - 8 - 32) // 2
+                icon.draw(vdi, icon_x, iy + 2, scale=2)
+
+            # Label
+            max_lbl = (cell_w - 8) // cw_f
+            label = name[:max_lbl]
+            lx = ix + (cell_w - 8 - len(label) * cw_f) // 2
+            ly = iy + 36
+
+            if idx == self._selected:
+                vdi.draw_string(lx, ly, label,
+                                Colors.WHITE, Colors.MENU_HIGHLIGHT)
+            else:
+                fg = Colors.CYAN if is_dir else Colors.DROPDOWN_TEXT
+                vdi.draw_string(lx, ly, label, fg, BG_TRANSPARENT)
+
+    def _draw_list_view(self, vdi, cx, cy, cw, ch):
+        """Draw entries as a text list with small icons."""
+        cw_f = vdi.font.char_w
+        ch_f = vdi.font.char_h
+        row_h = ch_f + 4
+        max_lines = ch // row_h
 
         for i in range(max_lines):
             idx = self._scroll_offset + i
             if idx >= len(self._entries):
                 break
             name, is_dir = self._entries[idx]
-            ey = list_y + i * (ch_f + 2)
+            ey = cy + i * row_h
 
-            # Highlight selected
+            # Alternating row background
             if idx == self._selected:
-                vdi.fill_rect(cx + 1, ey, cw - 2, ch_f + 2,
-                               Colors.MENU_HIGHLIGHT)
-                fg = Colors.MENU_HI_TEXT
+                vdi.fill_rect(cx + 1, ey, cw - 2, row_h,
+                              Colors.MENU_HIGHLIGHT)
+                fg = Colors.WHITE
                 bg = Colors.MENU_HIGHLIGHT
+            elif i % 2 == 1:
+                vdi.fill_rect(cx + 1, ey, cw - 2, row_h, 0x1A1A2A)
+                fg = Colors.CYAN if is_dir else Colors.DROPDOWN_TEXT
+                bg = 0x1A1A2A
             else:
                 fg = Colors.CYAN if is_dir else Colors.DROPDOWN_TEXT
-                bg = Colors.DROPDOWN_BG
+                bg = Colors.WINDOW_BG
 
-            # Icon + name
-            icon = "+" if is_dir else " "
-            display = f" {icon} {name}"[:max_chars]
-            vdi.draw_string(cx + 4, ey + 1, display, fg, bg)
+            # Small icon (1x = 16px)
+            icon_name_str = 'folder' if is_dir else icon_for_name(name)
+            icon = get_icon(icon_name_str)
+            if icon:
+                icon.draw(vdi, cx + 4, ey + (row_h - 16) // 2, scale=1)
+
+            # Name
+            max_chars = (cw - 28) // cw_f
+            display_name = name[:max_chars]
+            vdi.draw_string(cx + 24, ey + 2, display_name, fg, bg)
 
     def _on_click(self, win: Window, cx: int, cy: int, button: int) -> None:
         cw_f = self.aes.vdi.font.char_w
         ch_f = self.aes.vdi.font.char_h
-        # Path bar height
-        list_y = ch_f + 6
-        if cy < list_y:
+        _, _, win_cw, win_ch = win.client_rect()
+
+        toolbar_h = 30
+        path_h = ch_f + 6
+
+        # Toolbar button clicks
+        if cy < toolbar_h:
+            tbx = 4
+            btn_actions = [
+                self._go_parent,
+                self._go_parent,
+                lambda: self._navigate("/users/default"),
+                self._refresh,
+            ]
+            for i, action in enumerate(btn_actions):
+                if tbx <= cx < tbx + 28:
+                    action()
+                    return
+                tbx += 28
+            # View toggle
+            tbx += 8
+            for vname in ('icons', 'list'):
+                if tbx <= cx < tbx + 28:
+                    self._set_view(vname)
+                    return
+                tbx += 28
             return
 
-        idx = self._scroll_offset + (cy - list_y) // (ch_f + 2)
+        # Content area click
+        content_cy = toolbar_h + path_h + 2
+        if cy < content_cy:
+            return
+
+        rel_y = cy - content_cy
+
+        if self._view_mode == 'icons':
+            cell_w = 80
+            cell_h = 56
+            cols = max(1, win_cw // cell_w)
+            col = cx // cell_w
+            row = rel_y // cell_h + self._scroll_offset
+            idx = row * cols + col
+        else:
+            row_h = ch_f + 4
+            idx = self._scroll_offset + rel_y // row_h
+
         if 0 <= idx < len(self._entries):
             if self._selected == idx:
-                # Double-click: open
                 self._open_entry(idx)
             else:
                 self._selected = idx
@@ -1733,18 +2181,23 @@ class FileManagerCrystallite:
     def _on_key(self, win: Window, key: int, mod: int) -> None:
         import pygame
         ch_f = self.aes.vdi.font.char_h
-        _, _, _, ch = win.client_rect()
-        max_lines = (ch - ch_f - 8) // (ch_f + 2)
+        _, _, _, wch = win.client_rect()
+        toolbar_h = 30
+        path_h = ch_f + 6
+        content_h = wch - toolbar_h - path_h - 2 - (ch_f + 6)
+
+        if self._view_mode == 'list':
+            row_h = ch_f + 4
+            max_lines = content_h // row_h
+        else:
+            cell_h = 56
+            max_lines = content_h // cell_h * max(1, (wch // 80))
 
         if key == pygame.K_UP and self._selected > 0:
             self._selected -= 1
-            if self._selected < self._scroll_offset:
-                self._scroll_offset = self._selected
             self.aes._dirty = True
         elif key == pygame.K_DOWN and self._selected < len(self._entries) - 1:
             self._selected += 1
-            if self._selected >= self._scroll_offset + max_lines:
-                self._scroll_offset = self._selected - max_lines + 1
             self.aes._dirty = True
         elif key == pygame.K_RETURN and 0 <= self._selected < len(self._entries):
             self._open_entry(self._selected)
@@ -1752,51 +2205,65 @@ class FileManagerCrystallite:
             self._go_parent()
 
     def _open_entry(self, idx: int) -> None:
-        """Open selected entry — folder opens new window, file is info."""
+        """Open selected entry: folder → new window, file → scrap/editor."""
         if idx < 0 or idx >= len(self._entries):
             return
         name, is_dir = self._entries[idx]
-        full_path = os.path.join(self.path, name)
+        full_path = self.path.rstrip('/') + '/' + name
 
         if is_dir:
-            # Open a new file manager window for the subdirectory
             FileManagerCrystallite(
                 self.aes, path=full_path,
                 x=self.win.x + 20, y=self.win.y + 20,
                 w=self.win.w, h=self.win.h,
             )
         else:
-            # Put file info on scrap
-            try:
-                size = os.path.getsize(full_path)
-                info = f"{name} ({size} bytes)"
-            except OSError:
-                info = name
-            self.aes.scrap.put(info, 'text/plain')
-            self.aes._dirty = True
+            # Text/code files → open in editor
+            ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+            if ext in ('txt', 'lisp', 'md', 'profile', 'app'):
+                TextEditorCrystallite(
+                    self.aes, vfs_path=full_path,
+                    x=self.win.x + 30, y=self.win.y + 30,
+                )
+            else:
+                # Put file info on scrap
+                try:
+                    stat = self.aes.vfs.stat(full_path)
+                    info = f"{name} ({stat.get('size', '?')} bytes)"
+                except Exception:
+                    info = name
+                self.aes.scrap.put(info, 'text/plain')
+                self.aes._dirty = True
 
     def _go_parent(self) -> None:
         """Navigate to parent directory."""
-        parent = os.path.dirname(self.path)
-        if parent and parent != self.path:
-            self.path = parent
-            self.win.title = os.path.basename(self.path) or self.path
+        if self.path == '/':
+            return
+        parent = self.path.rstrip('/').rsplit('/', 1)[0] or '/'
+        self._navigate(parent)
+
+    def _navigate(self, path: str) -> None:
+        """Navigate to a new VFS path."""
+        try:
+            self.aes.vfs.resolve_dir(path)
+            self.path = _vfs_normalize(path)
+            title = self.path.rstrip('/').rsplit('/', 1)[-1] or "/"
+            self.win.title = title
+            self._scroll_offset = 0
             self._refresh()
+        except Exception:
+            pass
 
 
 class ControlPanelCrystallite:
-    """Control Panel — theme info and desktop settings.
-
-    Shows current theme colors and provides basic desktop
-    configuration. In future will support live theme switching.
-    """
+    """Control Panel — theme colors, system info, and VFS stats."""
 
     def __init__(self, aes: AES, x: int = 200, y: int = 100):
         self.aes = aes
-        self._section = 0  # 0=colors, 1=info
+        self._section = 0   # 0=colors, 1=info
 
-        w = 280
-        h = 300
+        w = 300
+        h = 340
         self.win = aes.create_window(
             "Control Panel", x, y, w, h,
             flags=WIN_CLOSEABLE | WIN_MOVEABLE,
@@ -1809,6 +2276,7 @@ class ControlPanelCrystallite:
                 ]),
             ],
         )
+        self.win._cryst_type = 'control-panel'
 
     def _set_section(self, s: int) -> None:
         self._section = s
@@ -1826,18 +2294,17 @@ class ControlPanelCrystallite:
         def _line(text: str, fg: int = Colors.DROPDOWN_TEXT):
             nonlocal y
             vdi.draw_string(cx + 4, y, text[:max_cols],
-                             fg, Colors.DROPDOWN_BG)
+                            fg, Colors.DROPDOWN_BG)
             y += ch_f + 1
 
         def _color_swatch(label: str, color: int):
             nonlocal y
-            # Draw small color swatch
             sw_x = cx + 4
             sw_y = y + 1
             vdi.fill_rect(sw_x, sw_y, 12, ch_f - 2, color)
             vdi.draw_string(cx + 20, y,
-                             f"{label}: #{color:06X}"[:max_cols],
-                             Colors.DROPDOWN_TEXT, Colors.DROPDOWN_BG)
+                            f"{label}: #{color:06X}"[:max_cols],
+                            Colors.DROPDOWN_TEXT, Colors.DROPDOWN_BG)
             y += ch_f + 1
 
         if self._section == 0:
@@ -1850,6 +2317,7 @@ class ControlPanelCrystallite:
             _color_swatch("Window Border", Colors.WINDOW_BORDER)
             _color_swatch("Menu BG", Colors.MENU_BAR_BG)
             _color_swatch("Close Button", Colors.CLOSE_BTN_BG)
+            _color_swatch("Taskbar BG", Colors.TASKBAR_BG)
             _color_swatch("Accent Blue", Colors.BLUE)
             _color_swatch("Accent Cyan", Colors.CYAN)
             _color_swatch("Accent Green", Colors.GREEN)
@@ -1862,43 +2330,504 @@ class ControlPanelCrystallite:
             _line(f"Windows: {len(self.aes._windows)}")
             _line(f"Scrap items: {len(self.aes.scrap.history)}")
             _line("")
-            _line("Crystal Desktop v1.0", Colors.CYAN)
+            # VFS stats
+            _line("Virtual Filesystem", Colors.CYAN)
+            file_count = 0
+            dir_count = 0
+            total_bytes = 0
+            for _dp, dirs, files in self.aes.vfs.walk("/"):
+                dir_count += len(dirs)
+                file_count += len(files)
+                for fname in files:
+                    fnode = self.aes.vfs.resolve_file(f"{_dp.rstrip('/')}/{fname}")
+                    if fnode:
+                        total_bytes += len(fnode.content)
+            _line(f"  Directories: {dir_count}")
+            _line(f"  Files: {file_count}")
+            _line(f"  Total size: {total_bytes} bytes")
+            _line("")
+            _line("Crystal Desktop v2.0", Colors.CYAN)
             _line("LM-1 List Machine")
 
     def _on_click(self, win: Window, cx: int, cy: int, button: int) -> None:
-        # Toggle section on click
         self._section = (self._section + 1) % 2
         self.aes._dirty = True
+
+
+# ===================================================================
+# Text Editor Crystallite
+# ===================================================================
+
+class TextEditorCrystallite:
+    """A text editor that reads/writes files on the virtual filesystem.
+
+    Features syntax highlighting for .lisp files, line numbers,
+    undo/redo, and save functionality.
+    """
+
+    def __init__(self, aes: AES, vfs_path: str | None = None,
+                 x: int = 80, y: int = 50, w: int = 520, h: int = 380):
+        self.aes = aes
+        self.vfs_path = vfs_path
+        self._lines: list[str] = [""]
+        self._cursor_line = 0
+        self._cursor_col = 0
+        self._scroll_y = 0
+        self._scroll_x = 0
+        self._modified = False
+        self._undo_stack: list[tuple[list[str], int, int]] = []
+        self._redo_stack: list[tuple[list[str], int, int]] = []
+        self._is_lisp = False
+
+        if vfs_path:
+            fname = vfs_path.rsplit('/', 1)[-1]
+            self._is_lisp = fname.endswith('.lisp')
+            try:
+                text = aes.vfs.read_text(vfs_path)
+                self._lines = text.split('\n')
+                if self._lines and self._lines[-1] == '':
+                    self._lines = self._lines[:-1] or [""]
+            except Exception:
+                self._lines = [""]
+            title = fname
+        else:
+            title = "Untitled"
+
+        self.win = aes.create_window(
+            title, x, y, w, h,
+            flags=WIN_CLOSEABLE | WIN_MOVEABLE | WIN_RESIZABLE
+                  | WIN_MAXIMIZABLE | WIN_MINIMIZABLE,
+            on_redraw=self._redraw,
+            on_key=self._on_key,
+            on_click=self._on_click,
+            menu=[
+                Menu("File", [
+                    MenuItem("Save", callback=self._save),
+                    MenuItem("Save As...", callback=self._save),
+                ]),
+                Menu("Edit", [
+                    MenuItem("Undo", callback=self._undo),
+                    MenuItem("Redo", callback=self._redo),
+                ]),
+            ],
+        )
+        self.win._cryst_type = 'editor'
+
+    def _push_undo(self) -> None:
+        """Save current state for undo."""
+        self._undo_stack.append(
+            ([l for l in self._lines], self._cursor_line, self._cursor_col)
+        )
+        if len(self._undo_stack) > 100:
+            self._undo_stack = self._undo_stack[-100:]
+        self._redo_stack.clear()
+
+    def _undo(self) -> None:
+        if not self._undo_stack:
+            return
+        self._redo_stack.append(
+            ([l for l in self._lines], self._cursor_line, self._cursor_col)
+        )
+        lines, cl, cc = self._undo_stack.pop()
+        self._lines = lines
+        self._cursor_line = cl
+        self._cursor_col = cc
+        self._modified = True
+        self.aes._dirty = True
+
+    def _redo(self) -> None:
+        if not self._redo_stack:
+            return
+        self._undo_stack.append(
+            ([l for l in self._lines], self._cursor_line, self._cursor_col)
+        )
+        lines, cl, cc = self._redo_stack.pop()
+        self._lines = lines
+        self._cursor_line = cl
+        self._cursor_col = cc
+        self._modified = True
+        self.aes._dirty = True
+
+    def _save(self) -> None:
+        """Save to VFS."""
+        if self.vfs_path:
+            text = '\n'.join(self._lines) + '\n'
+            try:
+                self.aes.vfs.write(self.vfs_path, text)
+                self._modified = False
+                fname = self.vfs_path.rsplit('/', 1)[-1]
+                self.win.title = fname
+                self.aes._dirty = True
+            except Exception:
+                pass
+
+    def _redraw(self, vdi: VDI, win: Window) -> None:
+        cx, cy, cw, ch = win.client_rect()
+        cw_f = vdi.font.char_w
+        ch_f = vdi.font.char_h
+        vdi.fill_rect(cx, cy, cw, ch, 0x0E0E1A)
+
+        # Gutter width (line numbers)
+        gutter_w = max(4, len(str(len(self._lines)))) * cw_f + 8
+
+        # Status bar at bottom
+        status_h = ch_f + 6
+        status_y = cy + ch - status_h
+        edit_h = ch - status_h
+
+        # Visible lines
+        max_vis = edit_h // ch_f
+        text_w = cw - gutter_w
+
+        for i in range(max_vis):
+            line_idx = self._scroll_y + i
+            if line_idx >= len(self._lines):
+                break
+
+            y = cy + i * ch_f
+            line = self._lines[line_idx]
+
+            # Current line highlight
+            if line_idx == self._cursor_line:
+                vdi.fill_rect(cx, y, cw, ch_f, 0x1A1A30)
+
+            # Line number in gutter
+            ln_str = str(line_idx + 1).rjust(gutter_w // cw_f - 1)
+            ln_fg = Colors.CYAN if line_idx == self._cursor_line else Colors.DARK_GRAY
+            vdi.draw_string(cx + 2, y, ln_str, ln_fg, BG_TRANSPARENT)
+
+            # Gutter separator
+            vdi.draw_line(cx + gutter_w - 2, y,
+                          cx + gutter_w - 2, y + ch_f - 1,
+                          0x333355)
+
+            # Text content with optional syntax highlighting
+            text_x = cx + gutter_w
+            visible_chars = text_w // cw_f
+            display_line = line[self._scroll_x:self._scroll_x + visible_chars]
+
+            if self._is_lisp:
+                spans = self._lisp_highlight(line, line_idx)
+                # Draw the full line char by char with colors
+                for ci, ch_char in enumerate(display_line):
+                    abs_ci = ci + self._scroll_x
+                    fg = Colors.DROPDOWN_TEXT
+                    for start, end, color in spans:
+                        if start <= abs_ci < end:
+                            fg = color
+                            break
+                    vdi.draw_char(text_x + ci * cw_f, y, ch_char,
+                                 fg, BG_TRANSPARENT)
+            else:
+                vdi.draw_string(text_x, y, display_line,
+                                Colors.DROPDOWN_TEXT, BG_TRANSPARENT)
+
+            # Cursor
+            if line_idx == self._cursor_line:
+                cur_screen_col = self._cursor_col - self._scroll_x
+                if 0 <= cur_screen_col < visible_chars:
+                    cur_x = text_x + cur_screen_col * cw_f
+                    vdi.fill_rect(cur_x, y, 2, ch_f, Colors.CYAN)
+
+        # Status bar
+        vdi.fill_rect(cx, status_y, cw, status_h, 0x181828)
+        vdi.draw_line(cx, status_y, cx + cw - 1, status_y, Colors.WINDOW_BORDER)
+        mod_marker = " [modified]" if self._modified else ""
+        status_text = f" Ln {self._cursor_line + 1}, Col {self._cursor_col + 1}{mod_marker}"
+        vdi.draw_string(cx + 4, status_y + 3, status_text,
+                        Colors.DARK_GRAY, 0x181828)
+
+        # Right side: file path
+        if self.vfs_path:
+            path_text = self.vfs_path
+            max_path = (cw - len(status_text) * cw_f - 16) // cw_f
+            if len(path_text) > max_path:
+                path_text = "..." + path_text[-(max_path - 3):]
+            vdi.draw_string(cx + cw - len(path_text) * cw_f - 4,
+                            status_y + 3, path_text,
+                            Colors.DARK_GRAY, 0x181828)
+
+    def _on_key(self, win: Window, key: int, mod: int) -> None:
+        import pygame
+
+        ctrl = mod & pygame.KMOD_CTRL
+        shift = mod & pygame.KMOD_SHIFT
+
+        if ctrl:
+            if key == ord('z'):
+                self._undo()
+                return
+            if key == ord('y'):
+                self._redo()
+                return
+            if key == ord('s'):
+                self._save()
+                return
+
+        if key == pygame.K_RETURN:
+            self._push_undo()
+            line = self._lines[self._cursor_line]
+            before = line[:self._cursor_col]
+            after = line[self._cursor_col:]
+            self._lines[self._cursor_line] = before
+            self._lines.insert(self._cursor_line + 1, after)
+            self._cursor_line += 1
+            self._cursor_col = 0
+            self._modified = True
+
+        elif key == pygame.K_BACKSPACE:
+            if self._cursor_col > 0:
+                self._push_undo()
+                line = self._lines[self._cursor_line]
+                self._lines[self._cursor_line] = line[:self._cursor_col - 1] + line[self._cursor_col:]
+                self._cursor_col -= 1
+                self._modified = True
+            elif self._cursor_line > 0:
+                self._push_undo()
+                prev = self._lines[self._cursor_line - 1]
+                curr = self._lines.pop(self._cursor_line)
+                self._cursor_line -= 1
+                self._cursor_col = len(prev)
+                self._lines[self._cursor_line] = prev + curr
+                self._modified = True
+
+        elif key == pygame.K_DELETE:
+            line = self._lines[self._cursor_line]
+            if self._cursor_col < len(line):
+                self._push_undo()
+                self._lines[self._cursor_line] = line[:self._cursor_col] + line[self._cursor_col + 1:]
+                self._modified = True
+            elif self._cursor_line < len(self._lines) - 1:
+                self._push_undo()
+                next_line = self._lines.pop(self._cursor_line + 1)
+                self._lines[self._cursor_line] = line + next_line
+                self._modified = True
+
+        elif key == pygame.K_LEFT:
+            if ctrl:
+                # Word jump
+                line = self._lines[self._cursor_line]
+                p = self._cursor_col - 1
+                while p > 0 and not line[p - 1].isalnum():
+                    p -= 1
+                while p > 0 and line[p - 1].isalnum():
+                    p -= 1
+                self._cursor_col = max(0, p)
+            elif self._cursor_col > 0:
+                self._cursor_col -= 1
+            elif self._cursor_line > 0:
+                self._cursor_line -= 1
+                self._cursor_col = len(self._lines[self._cursor_line])
+
+        elif key == pygame.K_RIGHT:
+            line = self._lines[self._cursor_line]
+            if ctrl:
+                p = self._cursor_col
+                while p < len(line) and not line[p].isalnum():
+                    p += 1
+                while p < len(line) and line[p].isalnum():
+                    p += 1
+                self._cursor_col = p
+            elif self._cursor_col < len(line):
+                self._cursor_col += 1
+            elif self._cursor_line < len(self._lines) - 1:
+                self._cursor_line += 1
+                self._cursor_col = 0
+
+        elif key == pygame.K_UP:
+            if self._cursor_line > 0:
+                self._cursor_line -= 1
+                self._cursor_col = min(self._cursor_col,
+                                       len(self._lines[self._cursor_line]))
+
+        elif key == pygame.K_DOWN:
+            if self._cursor_line < len(self._lines) - 1:
+                self._cursor_line += 1
+                self._cursor_col = min(self._cursor_col,
+                                       len(self._lines[self._cursor_line]))
+
+        elif key == pygame.K_HOME:
+            self._cursor_col = 0
+        elif key == pygame.K_END:
+            self._cursor_col = len(self._lines[self._cursor_line])
+
+        elif key == pygame.K_TAB:
+            self._push_undo()
+            line = self._lines[self._cursor_line]
+            self._lines[self._cursor_line] = line[:self._cursor_col] + "  " + line[self._cursor_col:]
+            self._cursor_col += 2
+            self._modified = True
+
+        elif 32 <= key <= 126:
+            ch_char = chr(key)
+            if shift:
+                ch_char = ch_char.upper()
+                shift_map = {
+                    '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
+                    '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+                    '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|',
+                    ';': ':', "'": '"', ',': '<', '.': '>', '/': '?',
+                    '`': '~',
+                }
+                if chr(key) in shift_map:
+                    ch_char = shift_map[chr(key)]
+            self._push_undo()
+            line = self._lines[self._cursor_line]
+            self._lines[self._cursor_line] = line[:self._cursor_col] + ch_char + line[self._cursor_col:]
+            self._cursor_col += 1
+            self._modified = True
+
+        # Scroll to keep cursor visible
+        self._ensure_cursor_visible()
+        self.aes._dirty = True
+
+    def _on_click(self, win: Window, rx: int, ry: int, button: int) -> None:
+        """Click to position cursor."""
+        cw_f = self.aes.vdi.font.char_w
+        ch_f = self.aes.vdi.font.char_h
+        _, _, cw, ch = win.client_rect()
+        gutter_w = max(4, len(str(len(self._lines)))) * cw_f + 8
+
+        if rx < gutter_w:
+            return  # Clicked in gutter
+
+        text_col = (rx - gutter_w) // cw_f + self._scroll_x
+        text_line = ry // ch_f + self._scroll_y
+
+        if 0 <= text_line < len(self._lines):
+            self._cursor_line = text_line
+            self._cursor_col = min(text_col, len(self._lines[text_line]))
+            self.aes._dirty = True
+
+    def _ensure_cursor_visible(self) -> None:
+        """Scroll to keep cursor in view."""
+        _, _, cw, ch = self.win.client_rect()
+        cw_f = self.aes.vdi.font.char_w
+        ch_f = self.aes.vdi.font.char_h
+        gutter_w = max(4, len(str(len(self._lines)))) * cw_f + 8
+        status_h = ch_f + 6
+        edit_h = ch - status_h
+        max_vis = edit_h // ch_f
+        text_w = cw - gutter_w
+        visible_chars = text_w // cw_f
+
+        if self._cursor_line < self._scroll_y:
+            self._scroll_y = self._cursor_line
+        elif self._cursor_line >= self._scroll_y + max_vis:
+            self._scroll_y = self._cursor_line - max_vis + 1
+
+        if self._cursor_col < self._scroll_x:
+            self._scroll_x = self._cursor_col
+        elif self._cursor_col >= self._scroll_x + visible_chars:
+            self._scroll_x = self._cursor_col - visible_chars + 1
+
+    # Lisp syntax highlighting
+    _LISP_KEYWORDS = frozenset([
+        'defun', 'defmacro', 'lambda', 'let', 'let*', 'letrec',
+        'if', 'cond', 'when', 'unless', 'and', 'or', 'not',
+        'begin', 'progn', 'do', 'loop', 'while',
+        'define', 'set!', 'setq', 'quote', 'quasiquote',
+    ])
+    _LISP_BUILTINS = frozenset([
+        'cons', 'car', 'cdr', 'list', 'append', 'reverse', 'length',
+        'map', 'filter', 'reduce', 'apply', 'eval',
+        'eq', 'equal', 'null', 'atom', 'pair',
+        '+', '-', '*', '/', 'mod', 'rem',
+        '=', '<', '>', '<=', '>=', '/=',
+        'print', 'display', 'newline', 'format',
+        'read', 'write', 'load',
+    ])
+
+    def _lisp_highlight(self, line: str, line_no: int) -> list[tuple[int, int, int]]:
+        """Return [(start, end, color), ...] for syntax highlighting."""
+        spans: list[tuple[int, int, int]] = []
+        i = 0
+        n = len(line)
+        while i < n:
+            ch = line[i]
+            if ch == ';':
+                spans.append((i, n, Colors.DARK_GRAY))
+                break
+            if ch == '"':
+                j = i + 1
+                while j < n and line[j] != '"':
+                    if line[j] == '\\':
+                        j += 1
+                    j += 1
+                spans.append((i, min(j + 1, n), Colors.GREEN))
+                i = j + 1
+                continue
+            if ch in '()[]':
+                spans.append((i, i + 1, 0x6688AA))
+                i += 1
+                continue
+            if ch.isdigit() or (ch == '-' and i + 1 < n and line[i + 1].isdigit()):
+                j = i + 1
+                while j < n and (line[j].isdigit() or line[j] == '.'):
+                    j += 1
+                spans.append((i, j, Colors.YELLOW))
+                i = j
+                continue
+            if ch not in ' \t()[]";\n':
+                j = i + 1
+                while j < n and line[j] not in ' \t()[]";\n':
+                    j += 1
+                word = line[i:j]
+                if word in self._LISP_KEYWORDS:
+                    spans.append((i, j, Colors.MAGENTA))
+                elif word in self._LISP_BUILTINS:
+                    spans.append((i, j, Colors.CYAN))
+                i = j
+                continue
+            i += 1
+        return spans
 
 
 # ===================================================================
 # Desktop launcher
 # ===================================================================
 
-def launch_desktop(width: int = 640, height: int = 480, scale: int = 2) -> None:
+def launch_desktop(width: int = 1024, height: int = 768,
+                   scale: int = 1) -> None:
     """Launch the Crystal Desktop interactively.
 
-    This is the main entry point for running the desktop.
+    Resolution defaults to 1024x768.
     """
     vdi = VDI(width=width, height=height, headless=False, scale=scale)
     aes = AES(vdi)
 
-    # Resource DB — can be loaded from Lisp files
     aes.resources = ResourceDB()
 
     # Create default crystallites
-    terminal = TerminalCrystallite(aes, x=20, y=40, w=400, h=300)
-    clock = ClockCrystallite(aes, x=440, y=30)
-    calc = CalculatorCrystallite(aes, x=440, y=120)
+    terminal = TerminalCrystallite(aes, x=180, y=60, w=500, h=360)
+    clock = ClockCrystallite(aes, x=720, y=30)
 
-    # Add system menu items for launching crystallites
+    # Desktop icons
+    icon_defs = [
+        ("Terminal", "terminal", lambda: TerminalCrystallite(aes)),
+        ("Files", "file_manager", lambda: FileManagerCrystallite(aes, path="/")),
+        ("Editor", "editor", lambda: TextEditorCrystallite(aes)),
+        ("Calculator", "calculator", lambda: CalculatorCrystallite(aes)),
+        ("Clock", "clock", lambda: ClockCrystallite(aes)),
+        ("Inspector", "inspector", lambda: InspectorCrystallite(aes)),
+        ("Settings", "settings", lambda: ControlPanelCrystallite(aes)),
+    ]
+    for i, (label, icon_name, action) in enumerate(icon_defs):
+        aes._desktop_icons.append(DesktopIcon(
+            label=label, icon_name=icon_name, action=action,
+            grid_row=i, grid_col=0,
+        ))
+
+    # System menu items
     aes._system_menus[0].items.extend([
+        MenuItem("", separator=True),
         MenuItem("New Terminal", callback=lambda: TerminalCrystallite(aes)),
+        MenuItem("File Manager",
+                 callback=lambda: FileManagerCrystallite(aes, path="/")),
+        MenuItem("Text Editor", callback=lambda: TextEditorCrystallite(aes)),
         MenuItem("Calculator", callback=lambda: CalculatorCrystallite(aes)),
         MenuItem("Clock", callback=lambda: ClockCrystallite(aes)),
         MenuItem("Inspector", callback=lambda: InspectorCrystallite(aes)),
-        MenuItem("File Manager",
-                 callback=lambda: FileManagerCrystallite(aes, path=".")),
         MenuItem("Control Panel",
                  callback=lambda: ControlPanelCrystallite(aes)),
         MenuItem("", separator=True),
@@ -1909,7 +2838,7 @@ def launch_desktop(width: int = 640, height: int = 480, scale: int = 2) -> None:
         MenuItem("Quit", callback=lambda: setattr(aes, '_running', False)),
     ])
 
-    # Override the main loop to include clock ticking
+    # Main loop with clock ticking
     import pygame
     aes.redraw()
 

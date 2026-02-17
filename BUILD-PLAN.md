@@ -180,7 +180,72 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [x] Title text drop shadows, dot-pattern resize grips
 - [x] Screenshot verification with DesktopDriver
 
-### Phase 13: Compiler Extensions
+### Phase 13: OS Foundation — Widget Toolkit, VFS, Icons
+**Goal:** The Python desktop stops being a toy. Real widget toolkit, real virtual filesystem, real icons. Everything after this builds on these foundations.
+**Status:** Not started.
+
+**Widget Toolkit (`toolkit.py`)**
+- [ ] `Widget` base: position, size, parent/children, focus, event dispatch, hit-testing
+- [ ] `Label`: text display, alignment, color
+- [ ] `Button`: gradient background, hover/press states, icon+text, on_click callback
+- [ ] `IconButton`: compact icon-only button for toolbars
+- [ ] `TextField`: single-line text input, cursor, selection, clipboard integration
+- [ ] `TextArea`: multi-line editor, line numbers, syntax highlighting hooks, undo/redo, scrolling
+- [ ] `ScrollBar`: vertical/horizontal, thumb drag, track click, page up/down
+- [ ] `ListView`: scrollable item list, icons+text, selection, double-click activate, alternating row colors
+- [ ] `IconView`: grid of icons with labels, selection, double-click, free-form or grid layout
+- [ ] `TreeView`: expandable hierarchy, expand/collapse arrows, indentation
+- [ ] `CheckBox`: toggle with label
+- [ ] `Panel`: container with background, border, padding, layout (vertical/horizontal)
+- [ ] `Toolbar`: horizontal icon button strip with separators
+- [ ] `Separator`: visual divider line
+- [ ] `ContextMenu`: right-click popup menu, keyboard shortcuts display, nested submenus
+- [ ] `ProgressBar`: determinate/indeterminate progress
+- [ ] `Slider`: value slider with range
+- [ ] `WidgetHost`: bridges AES Window callbacks to widget tree, manages focus, double-click detection
+
+**Virtual Filesystem (`vfs.py`)**
+- [ ] `VFSNode` base with name, metadata (created, modified, size, permissions, MIME type)
+- [ ] `VFSFile`: in-memory content (bytes), read/write
+- [ ] `VFSDirectory`: ordered children dict
+- [ ] `VFS`: resolve paths, mkdir, create/read/write/delete, list, stat, copy, move, walk
+- [ ] Default filesystem structure: `/system/`, `/applications/`, `/users/default/`, `/tmp/`
+- [ ] Pre-populated content: sample .lisp files, .txt files, app markers, system config
+- [ ] Mount points for bridging host filesystem (optional)
+
+**Icon System (`icons.py`)**
+- [ ] `Icon` class: 16×16 pixel art with palette, draw at 1x/2x scale
+- [ ] Stock icons (16+): folder, folder-open, file, file-text, file-code, file-image, application, terminal, calculator, clock, editor, settings, inspector, trash, disk, home
+- [ ] File-type → icon mapping by extension and MIME type
+- [ ] Icon caching for fast repeated rendering
+
+**Window Manager Upgrades**
+- [ ] Minimize button (−) and maximize button (□) in title bar
+- [ ] Window minimize → taskbar button, maximize → fill screen minus taskbar
+- [ ] Double-click title bar → maximize/restore toggle
+- [ ] Taskbar: gradient panel at bottom, Crystal button (left), window buttons (center), clock (right)
+- [ ] Desktop icons: clickable icon+label on the desktop background (Applications, Documents, Trash)
+- [ ] Right-click context menus on desktop, windows, and widgets
+- [ ] Double-click detection (400ms window, 5px tolerance)
+- [ ] Resolution upgrade: 1024×768 default
+
+- [ ] Test: widget toolkit unit tests, VFS CRUD tests, icon rendering tests, WM feature tests
+
+### Phase 14: Desktop Applications — Real Software
+**Goal:** Applications that are actually useful, not printf dumps in rectangles.
+**Status:** Not started. Depends on Phase 13 toolkit and VFS.
+
+- [ ] **Text Editor** crystallite: TextArea widget, line numbers, Lisp syntax highlighting (paren matching, keyword/string/comment coloring), open/save from VFS, undo/redo, find/replace, status bar (line:col, filename)
+- [ ] **File Manager** rewrite: toolbar (Back/Up/View toggle), IconView for icon mode, ListView for detail mode, breadcrumb path bar, VFS navigation, file properties dialog, context menu (Open/Copy/Cut/Paste/Delete/Rename/New Folder), status bar (item count, selection), drag-and-drop between windows
+- [ ] **Terminal** rewrite: proper scrollback buffer (1000 lines), command history (up/down), tab completion for commands and paths, ANSI-inspired color codes, resizable
+- [ ] **System Monitor**: process/thread view, memory usage (nursery/old-gen), VFS disk usage, live-updating graphs
+- [ ] **Image Viewer**: display VFS images, zoom/pan, fit-to-window
+- [ ] **Calculator** polish: expression display, scientific mode toggle, history, keyboard shortcuts
+- [ ] **Inspector** rewrite: TreeView of window hierarchy, property panel for selected widget/window, click-to-inspect mode (click any window element, inspector selects it)
+- [ ] **Control Panel** rewrite: real settings with CheckBox/Slider/ListView widgets, theme picker, display settings, about system
+- [ ] Test: each application tested for creation, rendering, and core interaction
+
+### Phase 15: Compiler Extensions
 **Goal:** Cross-compiler powerful enough to write the desktop natively.
 **Status:** Not started. Compiler already has: `defun`, `lambda`, `let`, `if`, `cond`, `and`, `or`, `set!`, `quote`, arithmetic, cons ops, comparisons.
 
@@ -194,7 +259,7 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [ ] VDI trap wrappers: `(vdi-fill-rect x y w h color)` etc.
 - [ ] Test: compile and run programs using all new forms
 
-### Phase 14: Native Desktop Skeleton
+### Phase 16: Native Desktop Skeleton
 **Goal:** Event loop and basic window management running as compiled Lisp on the LM-1.
 **Status:** Not started.
 
@@ -206,11 +271,10 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [ ] Boots via BIOS, runs as OS image
 - [ ] Test: native desktop boots, draws a window, handles click
 
-### Phase 15: Live Development Environment
+### Phase 17: Live Development Environment
 **Goal:** Edit code in a crystallite, eval it, and the running system changes — while you watch.
-**Status:** Not started. Can prototype on the Python-hosted desktop before going fully native.
+**Status:** Not started.
 
-- [ ] Editor crystallite: buffer-based text editor with cursor, insert/delete, scroll
 - [ ] Lisp syntax highlighting in the editor (paren matching, keyword coloring)
 - [ ] Eval-region: select code in editor, eval it, result appears in a REPL pane
 - [ ] Hot-patch: redefine a function and IC entries invalidate — next call picks up new definition
@@ -218,7 +282,7 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [ ] **Killer demo:** open editor, modify `_draw_window` (or the native equivalent), eval, title bars change appearance in real time while the desktop is running
 - [ ] Test: redefine a function, call it, verify new behavior; trigger an error, verify debugger crystallite opens
 
-### Phase 16: Object System (CLOS on Hardware)
+### Phase 18: Object System (CLOS on Hardware)
 **Goal:** Full object system where `defclass` maps to shapes and `defgeneric`/`defmethod` dispatch through the IC.
 **Status:** Not started. Phase 4 (IC + shapes) provides the hardware foundation.
 
@@ -231,20 +295,20 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [ ] `change-class`: reshape an object live (update shape, migrate slots)
 - [ ] Test: define a class hierarchy, dispatch methods, verify IC hits, change-class
 
-### Phase 17: Condition System
+### Phase 19: Condition System
 **Goal:** Restartable errors — signal a condition, handle it without unwinding, pick a restart.
 **Status:** Not started.
 
-- [ ] `define-condition`: condition types as classes (builds on Phase 16)
+- [ ] `define-condition`: condition types as classes (builds on Phase 18)
 - [ ] `signal` / `error` / `warn`: walk handler chain, find matching handler
 - [ ] `handler-bind`: establish handlers (non-unwinding — stack stays live)
 - [ ] `handler-case`: establish handlers (unwinding — like try/catch)
 - [ ] `restart-bind` / `invoke-restart`: offer recovery strategies
 - [ ] Standard restarts: `abort`, `continue`, `use-value`, `store-value`
-- [ ] Integration with debugger crystallite (Phase 15): interactive restart selection
+- [ ] Integration with debugger crystallite (Phase 17): interactive restart selection
 - [ ] Test: signal a condition, handle it, invoke a restart, verify execution resumes correctly
 
-### Phase 18: Actor Runtime & Parallel Primitives
+### Phase 20: Actor Runtime & Parallel Primitives
 **Goal:** Erlang-style lightweight processes on tiles. Parallel map/reduce over cons structures.
 **Status:** Not started. Phase 5 (SEND/RECV/multi-tile) provides the hardware foundation.
 
@@ -259,9 +323,9 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [ ] Load balancing: work-stealing or round-robin tile assignment
 - [ ] Test: spawn 100 processes across 4 tiles, pmap a function, verify results
 
-### Phase 19: Parallel Lisp Compiler (Self-Hosting)
+### Phase 21: Parallel Lisp Compiler (Self-Hosting)
 **Goal:** The cross-compiler rewritten in Lisp, running on the LM-1, compiling itself.
-**Status:** Not started. Depends on Phases 13 (compiler extensions), 16 (object system), 18 (actors).
+**Status:** Not started. Depends on Phases 15 (compiler extensions), 18 (object system), 20 (actors).
 
 - [ ] Port the parser (`parse`) to native Lisp
 - [ ] Port expression compiler to native Lisp (emit assembly text or direct code gen)
@@ -270,7 +334,7 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [ ] Bootstrap test: compiler compiles itself, output matches
 - [ ] Benchmark: compile a large program, measure speedup from N tiles vs 1
 
-### Phase 20: Application Showcase
+### Phase 22: Application Showcase
 **Goal:** Real applications that demonstrate what a modern Lisp machine with 64 tiles can do.
 **Status:** Not started. Pick from the menu below based on interest.
 
@@ -278,7 +342,7 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [ ] **Parallel ray tracer** — tiles own screen regions, trace independently, shared scene graph in old-gen. Real-time preview in a crystallite window.
 - [ ] **Actor-based chat system** — actors on different tiles (or eventually different machines) sending messages. Chat UI as a crystallite.
 - [ ] **Genetic programming engine** — evolve Lisp programs. Each tile runs a population. Fitness = native execution. Migration via SEND. The machine breeds programs.
-- [ ] **Lisp-scripted game** — tile for physics, tile for AI, tile for rendering, message-passing between them. Game logic is hot-editable via the live IDE (Phase 15).
+- [ ] **Lisp-scripted game** — tile for physics, tile for AI, tile for rendering, message-passing between them. Game logic is hot-editable via the live IDE (Phase 17).
 - [ ] **Generative art** — parallel L-systems / fractal computation, results stream into VDI framebuffer, interactive parameter tweaking from REPL.
 - [ ] **Music synthesizer** — tiles as oscillators/filters, message-passing as signal routing, patch definitions as Lisp data, waveform visualizer crystallite.
 - [ ] **Distributed key-value store** — each tile owns a partition, queries fan out as messages, transactions via CAS.TAGGED.
@@ -299,7 +363,9 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 | 8     | —     |
 | 9     | 23    |
 | 10    | 24    |
-| **Total** | **175** (all passing) |
+| 11    | 31    |
+| 12    | —     |
+| **Total** | **209** (all passing) |
 
 ---
 
@@ -307,6 +373,9 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 
 - **Python 3.12.3** with venv (no C++ acceleration yet)
 - **LM-1 ISA:** 64-bit tagged words, 32-bit fixed-width instructions, 6-bit opcode, 5 encoding formats
-- **VDI:** 640×480 default, 8-bit indexed color, pygame display (headless for tests)
+- **VDI:** 1024×768 default, 32-bit RGBA truecolor, pygame display (headless for tests)
+- **Widget Toolkit:** `toolkit.py` — full widget set rendering through VDI, WidgetHost bridges to AES windows
+- **VFS:** `vfs.py` — in-memory virtual filesystem, no host filesystem access from the OS
+- **Icons:** `icons.py` — 16×16 pixel-art stock icons for files/folders/apps, 1x/2x rendering
 - **Cross-compiler:** Lisp → LM-1 assembly → binary via two-pass assembler
-- **Desktop:** Host-side Python (AES + VDI). Native port planned for Phase 14.
+- **Desktop:** Host-side Python (AES + VDI + Toolkit). Native port planned for Phase 16.
