@@ -10,7 +10,11 @@
 //   - Control FSM (multi-cycle orchestration)
 //   - Header template table (256×64)
 //   - Inline cache table (16-entry fully-associative)
+//   - Hardware message queues (4 FIFOs)
+//   - Performance counters (8 × 64-bit)
 //   - Main memory (SRAM)
+//
+// GC engine command interface is exposed for tile/cluster wiring.
 //
 // Memory:
 //   Single 64-bit SRAM port, addressed in 8-byte words.
@@ -48,7 +52,29 @@ module lm1_cpu
 
     // Debug: allow reading registers
     input  logic [REG_IDX_W-1:0] dbg_reg_addr,
-    output logic [XLEN-1:0]     dbg_reg_data
+    output logic [XLEN-1:0]     dbg_reg_data,
+
+    // --- GC engine command interface (exposed for tile/cluster) ---
+    output logic               gc_cmd_valid,
+    output logic [3:0]         gc_cmd_op,
+    output logic [XLEN-1:0]   gc_cmd_arg0,
+    output logic [XLEN-1:0]   gc_cmd_arg1,
+    input  logic               gc_cmd_ready,
+    input  logic               gc_engine_busy,
+
+    // --- External message queue port (NoC ↔ queue) ---
+    input  logic               ext_mq_wr_en,
+    input  logic [1:0]         ext_mq_wr_id,
+    input  logic [XLEN-1:0]   ext_mq_wr_data,
+    output logic               ext_mq_wr_ready,
+    input  logic               ext_mq_rd_en,
+    input  logic [1:0]         ext_mq_rd_id,
+    output logic [XLEN-1:0]   ext_mq_rd_data,
+    output logic               ext_mq_rd_valid,
+
+    // --- Queue status ---
+    output logic [3:0]         mq_empty,
+    output logic [3:0]         mq_full
 );
 
     // ---------------------------------------------------------------
@@ -109,6 +135,27 @@ module lm1_cpu
     logic [XLEN-1:0]   ic_inst_pc;
     logic [31:0]        ic_inst_shape;
     logic [XLEN-1:0]   ic_inst_target;
+
+    // Message queue — core side
+    logic               mq_wr_en;
+    logic [1:0]         mq_wr_id;
+    logic [XLEN-1:0]   mq_wr_data;
+    logic               mq_wr_ready;
+    logic               mq_rd_en;
+    logic [1:0]         mq_rd_id;
+    logic [XLEN-1:0]   mq_rd_data;
+    logic               mq_rd_valid;
+
+    // Performance counter
+    logic [4:0]         ctr_id;
+    logic [XLEN-1:0]   ctr_value;
+    logic               ctr_alloc_inc;
+    logic [15:0]        ctr_alloc_bytes_inc;
+    logic               ctr_barrier_fire_inc;
+    logic               ctr_barrier_filt_inc;
+    logic               ctr_ic_hit_inc;
+    logic               ctr_ic_miss_inc;
+    logic               ctr_nursery_ovf_inc;
 
     // ---------------------------------------------------------------
     // Decoder: not used as control classification signals
@@ -316,11 +363,86 @@ module lm1_cpu
         .ic_inst_pc   (ic_inst_pc),
         .ic_inst_shape(ic_inst_shape),
         .ic_inst_target(ic_inst_target),
+        // Message queue
+        .mq_wr_en     (mq_wr_en),
+        .mq_wr_id     (mq_wr_id),
+        .mq_wr_data   (mq_wr_data),
+        .mq_wr_ready  (mq_wr_ready),
+        .mq_rd_en     (mq_rd_en),
+        .mq_rd_id     (mq_rd_id),
+        .mq_rd_data   (mq_rd_data),
+        .mq_rd_valid  (mq_rd_valid),
+        // GC engine command
+        .gc_cmd_valid (gc_cmd_valid),
+        .gc_cmd_op    (gc_cmd_op),
+        .gc_cmd_arg0  (gc_cmd_arg0),
+        .gc_cmd_arg1  (gc_cmd_arg1),
+        .gc_cmd_ready (gc_cmd_ready),
+        .gc_engine_busy(gc_engine_busy),
+        // Perf counter read
+        .ctr_id       (ctr_id),
+        .ctr_value    (ctr_value),
+        // Config
         .cfg_tile_id  (cfg_tile_id),
         .cfg_thread_id(cfg_thread_id),
         .halted       (halted),
         .pc_out       (pc_out),
-        .cycle_count  (cycle_count)
+        .cycle_count  (cycle_count),
+        // Perf counter strobes
+        .ctr_alloc_inc       (ctr_alloc_inc),
+        .ctr_alloc_bytes_inc (ctr_alloc_bytes_inc),
+        .ctr_barrier_fire_inc(ctr_barrier_fire_inc),
+        .ctr_barrier_filt_inc(ctr_barrier_filt_inc),
+        .ctr_ic_hit_inc      (ctr_ic_hit_inc),
+        .ctr_ic_miss_inc     (ctr_ic_miss_inc),
+        .ctr_nursery_ovf_inc (ctr_nursery_ovf_inc)
+    );
+
+    // ---------------------------------------------------------------
+    // Hardware Message Queues (4 FIFOs)
+    // ---------------------------------------------------------------
+    lm1_msg_queue u_msg_queue (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        // Core ports
+        .wr_en        (mq_wr_en),
+        .wr_id        (mq_wr_id),
+        .wr_data      (mq_wr_data),
+        .wr_ready     (mq_wr_ready),
+        .rd_en        (mq_rd_en),
+        .rd_id        (mq_rd_id),
+        .rd_data      (mq_rd_data),
+        .rd_valid     (mq_rd_valid),
+        // External ports (for NoC / tile interconnect)
+        .ext_wr_en    (ext_mq_wr_en),
+        .ext_wr_id    (ext_mq_wr_id),
+        .ext_wr_data  (ext_mq_wr_data),
+        .ext_wr_ready (ext_mq_wr_ready),
+        .ext_rd_en    (ext_mq_rd_en),
+        .ext_rd_id    (ext_mq_rd_id),
+        .ext_rd_data  (ext_mq_rd_data),
+        .ext_rd_valid (ext_mq_rd_valid),
+        // Status
+        .q_empty      (mq_empty),
+        .q_full       (mq_full)
+    );
+
+    // ---------------------------------------------------------------
+    // Performance Counters
+    // ---------------------------------------------------------------
+    lm1_perf_counters u_perf_ctrs (
+        .clk              (clk),
+        .rst_n            (rst_n),
+        .alloc_inc        (ctr_alloc_inc),
+        .alloc_bytes_inc  (ctr_alloc_bytes_inc),
+        .barrier_fire_inc (ctr_barrier_fire_inc),
+        .barrier_filt_inc (ctr_barrier_filt_inc),
+        .ic_hit_inc       (ctr_ic_hit_inc),
+        .ic_miss_inc      (ctr_ic_miss_inc),
+        .gc_cycle_inc     (gc_engine_busy),  // count every cycle an engine is active
+        .nursery_ovf_inc  (ctr_nursery_ovf_inc),
+        .rd_id            (ctr_id),
+        .rd_value         (ctr_value)
     );
 
     // ---------------------------------------------------------------

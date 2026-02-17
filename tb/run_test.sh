@@ -30,7 +30,8 @@ if [ ! -f "$BUILD_DIR/obj_dir/Vlm1_tb" ]; then
     verilator --binary --timing -j 0 \
         -Wno-UNUSEDSIGNAL -Wno-UNDRIVEN -Wno-UNUSEDPARAM -Wno-UNOPTFLAT \
         -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-CASEINCOMPLETE \
-        -Wno-BLKANDNBLK -Wno-INITIALDLY \
+        -Wno-BLKANDNBLK -Wno-INITIALDLY -Wno-SYNCASYNCNET \
+        -Wno-PINCONNECTEMPTY \
         -GMAX_CYCLES=100000 \
         --top-module lm1_tb \
         -I"$ROOT/rtl/core" -I"$ROOT/rtl/tech" \
@@ -43,6 +44,8 @@ if [ ! -f "$BUILD_DIR/obj_dir/Vlm1_tb" ]; then
         "$ROOT/rtl/core/lm1_control.sv" \
         "$ROOT/rtl/core/lm1_tmpl_table.sv" \
         "$ROOT/rtl/core/lm1_ic_table.sv" \
+        "$ROOT/rtl/core/lm1_msg_queue.sv" \
+        "$ROOT/rtl/core/lm1_perf_counters.sv" \
         "$ROOT/rtl/core/lm1_cpu.sv" \
         "$ROOT/rtl/tech/lm1_sram_sp.sv" \
         "$ROOT/tb/lm1_tb.sv"
@@ -52,7 +55,7 @@ fi
 # Run
 echo "=== Running test: $TEST_NAME ==="
 cd "$BUILD_DIR"
-./obj_dir/Vlm1_tb +verilator+seed+0 +verilator+rand+reset+0 \
+./obj_dir/Vlm1_tb +verilator+seed+1 +verilator+rand+reset+0 \
     "+HEX=$HEX_FILE" \
     2>&1 | tee "$ROOT/tb/tests/${TEST_NAME}.log"
 

@@ -34,6 +34,19 @@ module lm1_tb;
     logic [REG_IDX_W-1:0] dbg_reg_addr;
     logic [XLEN-1:0]     dbg_reg_data;
 
+    // GC engine command (stub — tied off for standalone CPU test)
+    logic               gc_cmd_valid;
+    logic [3:0]         gc_cmd_op;
+    logic [XLEN-1:0]   gc_cmd_arg0;
+    logic [XLEN-1:0]   gc_cmd_arg1;
+
+    // Message queue external port (stub)
+    logic [XLEN-1:0]   ext_mq_rd_data;
+    logic               ext_mq_rd_valid;
+    logic               ext_mq_wr_ready;
+    logic [3:0]         mq_empty;
+    logic [3:0]         mq_full;
+
     // DUT
     lm1_cpu #(
         .MEM_DEPTH_LOG2(MEM_DEPTH_LOG2)
@@ -51,7 +64,26 @@ module lm1_tb;
         .ext_mem_wdata (ext_mem_wdata),
         .ext_mem_rdata (ext_mem_rdata),
         .dbg_reg_addr  (dbg_reg_addr),
-        .dbg_reg_data  (dbg_reg_data)
+        .dbg_reg_data  (dbg_reg_data),
+        // GC engine — not connected (engine always ready/idle)
+        .gc_cmd_valid  (gc_cmd_valid),
+        .gc_cmd_op     (gc_cmd_op),
+        .gc_cmd_arg0   (gc_cmd_arg0),
+        .gc_cmd_arg1   (gc_cmd_arg1),
+        .gc_cmd_ready  (1'b1),
+        .gc_engine_busy(1'b0),
+        // External message queue — not connected
+        .ext_mq_wr_en  (1'b0),
+        .ext_mq_wr_id  (2'b0),
+        .ext_mq_wr_data(64'b0),
+        .ext_mq_wr_ready(ext_mq_wr_ready),
+        .ext_mq_rd_en  (1'b0),
+        .ext_mq_rd_id  (2'b0),
+        .ext_mq_rd_data(ext_mq_rd_data),
+        .ext_mq_rd_valid(ext_mq_rd_valid),
+        // Queue status
+        .mq_empty      (mq_empty),
+        .mq_full       (mq_full)
     );
 
     // Clock generation

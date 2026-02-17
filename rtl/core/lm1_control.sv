@@ -77,6 +77,28 @@ module lm1_control
     output logic [31:0]        ic_inst_shape,
     output logic [XLEN-1:0]    ic_inst_target,
 
+    // -- Message queue interface (4 hardware queues) --
+    output logic                mq_wr_en,
+    output logic [1:0]         mq_wr_id,         // which queue
+    output logic [XLEN-1:0]    mq_wr_data,
+    input  logic                mq_wr_ready,      // queue not full
+    output logic                mq_rd_en,
+    output logic [1:0]         mq_rd_id,         // which queue
+    input  logic [XLEN-1:0]    mq_rd_data,
+    input  logic                mq_rd_valid,      // queue not empty
+
+    // -- GC engine command interface --
+    output logic                gc_cmd_valid,
+    output logic [3:0]         gc_cmd_op,
+    output logic [XLEN-1:0]    gc_cmd_arg0,      // region base / pointer list base
+    output logic [XLEN-1:0]    gc_cmd_arg1,      // region size / dest base
+    input  logic                gc_cmd_ready,     // engine accepts command
+    input  logic                gc_engine_busy,   // any engine currently active
+
+    // -- Performance counter read port --
+    output logic [4:0]         ctr_id,
+    input  logic [XLEN-1:0]    ctr_value,
+
     // -- Config --
     input  logic [XLEN-1:0]    cfg_tile_id,
     input  logic [XLEN-1:0]    cfg_thread_id,
@@ -84,7 +106,16 @@ module lm1_control
     // -- Status --
     output logic                halted,
     output logic [XLEN-1:0]    pc_out,
-    output logic [XLEN-1:0]    cycle_count
+    output logic [XLEN-1:0]    cycle_count,
+
+    // -- Performance counter increment strobes --
+    output logic                ctr_alloc_inc,
+    output logic [15:0]        ctr_alloc_bytes_inc,
+    output logic                ctr_barrier_fire_inc,
+    output logic                ctr_barrier_filt_inc,
+    output logic                ctr_ic_hit_inc,
+    output logic                ctr_ic_miss_inc,
+    output logic                ctr_nursery_ovf_inc
 );
 
     // ---------------------------------------------------------------
@@ -138,6 +169,13 @@ module lm1_control
         S_CLOS_CODE_RD,
         S_CLOS_CODE_WAIT,
         S_IC_DISPATCH,
+        S_BARRIER_CHECK,
+        S_BARRIER_MARK,
+        S_BARRIER_MARK_W,
+        S_SEND_WAIT,
+        S_RECV_WAIT,
+        S_ENQ_WAIT,
+        S_FENCE_GC,
         S_TRAP_LOOKUP,
         S_TRAP_WAIT,
         S_HALTED
@@ -176,6 +214,12 @@ module lm1_control
     logic [7:0]      trap_cause;
     logic            in_trap;
 
+    // Barrier configuration registers (set via system traps)
+    logic [XLEN-1:0] card_table_base;
+    logic [5:0]      card_shift;       // log2(card_size), default=6 → 64B cards
+    logic [XLEN-1:0] gen_boundary;     // addrs < gen_boundary are nursery (Gen 0)
+    logic [XLEN-1:0] queue_base;       // message-queue base address
+
     // ---------------------------------------------------------------
     // Next-state signals (all computed in always_comb)
     // ---------------------------------------------------------------
@@ -198,6 +242,11 @@ module lm1_control
     logic [XLEN-1:0] trap_tbl_n, trap_pc_n;
     logic [7:0]      trap_cause_n;
     logic            in_trap_n;
+
+    logic [XLEN-1:0] card_table_base_n;
+    logic [5:0]      card_shift_n;
+    logic [XLEN-1:0] gen_boundary_n;
+    logic [XLEN-1:0] queue_base_n;
 
     // ---------------------------------------------------------------
     // Outputs
@@ -236,6 +285,10 @@ module lm1_control
             trap_pc    <= '0;
             trap_cause <= '0;
             in_trap    <= 1'b0;
+            card_table_base <= '0;
+            card_shift <= 6'd6;  // default 64-byte cards
+            gen_boundary <= '0;
+            queue_base <= '0;
         end else begin
             state      <= ns;
             pc         <= pc_n;
@@ -262,6 +315,10 @@ module lm1_control
             trap_pc    <= trap_pc_n;
             trap_cause <= trap_cause_n;
             in_trap    <= in_trap_n;
+            card_table_base <= card_table_base_n;
+            card_shift <= card_shift_n;
+            gen_boundary <= gen_boundary_n;
+            queue_base <= queue_base_n;
         end
     end
 
@@ -298,6 +355,11 @@ module lm1_control
         trap_pc_n   = trap_pc;
         trap_cause_n = trap_cause;
         in_trap_n   = in_trap;
+
+        card_table_base_n = card_table_base;
+        card_shift_n = card_shift;
+        gen_boundary_n = gen_boundary;
+        queue_base_n = queue_base;
 
         // === Default outputs ===
         rf_we       = 1'b0;
@@ -336,6 +398,29 @@ module lm1_control
         ic_inst_pc    = '0;
         ic_inst_shape = '0;
         ic_inst_target = '0;
+
+        // Message queue defaults
+        mq_wr_en    = 1'b0;
+        mq_wr_id    = '0;
+        mq_wr_data  = '0;
+        mq_rd_en    = 1'b0;
+        mq_rd_id    = '0;
+
+        // GC engine defaults
+        gc_cmd_valid = 1'b0;
+        gc_cmd_op    = '0;
+        gc_cmd_arg0  = '0;
+        gc_cmd_arg1  = '0;
+
+        // Perf counter defaults
+        ctr_id               = '0;
+        ctr_alloc_inc        = 1'b0;
+        ctr_alloc_bytes_inc  = '0;
+        ctr_barrier_fire_inc = 1'b0;
+        ctr_barrier_filt_inc = 1'b0;
+        ctr_ic_hit_inc       = 1'b0;
+        ctr_ic_miss_inc      = 1'b0;
+        ctr_nursery_ovf_inc  = 1'b0;
 
         // =========================================================
         case (state)
@@ -548,7 +633,7 @@ module lm1_control
                 end
             end
 
-            OP_ST, OP_ST_WB: begin
+            OP_ST: begin
                 if (!is_any_ref(opa)) begin
                     tc_n    = TRAP_NOT_REF;
                     cyc_inc = 1'b0;
@@ -560,6 +645,36 @@ module lm1_control
                     cyc_inc = 1'b0;
                     pc_n    = pc;
                     ns      = S_FIELD_MEM;
+                end
+            end
+
+            // ===== Store with write barrier =====
+            // Stores opb (rs1 value) into opa[field], then checks
+            // whether a card-table mark is needed.
+            //
+            // Barrier fires when:
+            //   1. Stored value (opb) is a ref (any_ref tag)
+            //   2. Container (opa) address >= gen_boundary (old-gen)
+            //   3. Stored ref (opb) address < gen_boundary (nursery)
+            // This detects old→young cross-generation stores.
+            //
+            // If barrier fires: compute card-table byte address,
+            // issue a byte store to mark the card dirty (0xFF).
+            OP_ST_WB: begin
+                if (!is_any_ref(opa)) begin
+                    tc_n    = TRAP_NOT_REF;
+                    cyc_inc = 1'b0;
+                    pc_n    = pc;
+                    ns      = S_TRAP_LOOKUP;
+                end else begin
+                    ta_n    = ref_address(opa) + {56'b0, dr.rs2 + 5'd1, 3'b0};
+                    td_n    = opb;              // value being stored
+                    tt_n    = ref_address(opa);  // container address (for card calc)
+                    cyc_inc = 1'b0;
+                    pc_n    = pc;
+                    ns      = S_FIELD_MEM;      // do the store first
+                    // After S_FIELD_MEM completes, opcode==ST_WB triggers
+                    // barrier check in S_BARRIER_CHECK path
                 end
             end
 
@@ -867,6 +982,22 @@ module lm1_control
                             tmpl_wr_idx  = rf_rd1_data[7:0];
                             tmpl_wr_data = rf_rd2_data;
                         end
+                        8'h92: begin  // SET_CARD_BASE
+                            rf_rd1_addr       = 5'd1;
+                            card_table_base_n = rf_rd1_data;
+                        end
+                        8'h93: begin  // SET_CARD_SHIFT
+                            rf_rd1_addr  = 5'd1;
+                            card_shift_n = rf_rd1_data[5:0];
+                        end
+                        8'h94: begin  // SET_GEN_BOUNDARY
+                            rf_rd1_addr    = 5'd1;
+                            gen_boundary_n = rf_rd1_data;
+                        end
+                        8'h95: begin  // SET_QUEUE_BASE
+                            rf_rd1_addr  = 5'd1;
+                            queue_base_n = rf_rd1_data;
+                        end
                         default: ;
                     endcase
                     ns = S_FETCH;
@@ -895,12 +1026,22 @@ module lm1_control
                 rf_we     = 1'b1;
                 rf_w_addr = dr.rd;
                 case (dr.rs1)
-                    SYS_TILE_ID:    rf_w_data = cfg_tile_id;
-                    SYS_THREAD_ID:  rf_w_data = cfg_thread_id;
-                    SYS_CYCLE:      rf_w_data = cyc;
-                    SYS_TRAP_CAUSE: rf_w_data = {56'b0, trap_cause};
-                    SYS_TRAP_PC:    rf_w_data = trap_pc;
-                    default:        rf_w_data = '0;
+                    SYS_TILE_ID:      rf_w_data = cfg_tile_id;
+                    SYS_THREAD_ID:    rf_w_data = cfg_thread_id;
+                    SYS_CYCLE:        rf_w_data = cyc;
+                    SYS_TRAP_CAUSE:   rf_w_data = {56'b0, trap_cause};
+                    SYS_TRAP_PC:      rf_w_data = trap_pc;
+                    SYS_CARD_BASE:    rf_w_data = card_table_base;
+                    SYS_CARD_SHIFT:   rf_w_data = {58'b0, card_shift};
+                    SYS_GEN_BOUNDARY: rf_w_data = gen_boundary;
+                    SYS_QUEUE_BASE:   rf_w_data = queue_base;
+                    SYS_GC_STATUS:    rf_w_data = {63'b0, gc_engine_busy};
+                    SYS_PERF_CTR: begin
+                        // Counter ID in imm16[4:0]
+                        ctr_id    = dr.imm16[4:0];
+                        rf_w_data = ctr_value;
+                    end
+                    default:          rf_w_data = '0;
                 endcase
                 ns = S_FETCH;
             end
@@ -913,18 +1054,89 @@ module lm1_control
                     ns = S_FETCH;
             end
 
-            // ===== No-ops =====
+            // ===== No-ops: Prefetch family =====
             OP_PREFETCH_REF, OP_PREFETCH_FLD,
-            OP_PREFETCH_CDR, OP_GATHER_PRE,
-            OP_ENQ_SCAN, OP_ENQ_COPY,
-            OP_ENQ_FIXUP, OP_ENQ_COMPACT: begin
+            OP_PREFETCH_CDR, OP_GATHER_PRE: begin
                 ns = S_FETCH;
+            end
+
+            // ===== GC engine commands =====
+            // ENQ.SCAN/COPY/FIXUP/COMPACT: issue a command to the
+            // cluster's movement engines.
+            //   rs1 = region base address (opb)
+            //   rs2 = region size / dest addr (read from port 1)
+            OP_ENQ_SCAN: begin
+                gc_cmd_valid = 1'b1;
+                gc_cmd_op    = GC_CMD_SCAN;
+                gc_cmd_arg0  = opb;             // region base
+                gc_cmd_arg1  = rf_rd1_data;     // region size (rs2 on port1)
+                rf_rd1_addr  = dr.rs2;
+                if (gc_cmd_ready) begin
+                    ns = S_FETCH;
+                end else begin
+                    cyc_inc = 1'b0;
+                    pc_n    = pc;
+                    ns      = S_ENQ_WAIT;
+                end
+            end
+
+            OP_ENQ_COPY: begin
+                gc_cmd_valid = 1'b1;
+                gc_cmd_op    = GC_CMD_COPY;
+                gc_cmd_arg0  = opb;
+                gc_cmd_arg1  = rf_rd1_data;
+                rf_rd1_addr  = dr.rs2;
+                if (gc_cmd_ready) begin
+                    ns = S_FETCH;
+                end else begin
+                    cyc_inc = 1'b0;
+                    pc_n    = pc;
+                    ns      = S_ENQ_WAIT;
+                end
+            end
+
+            OP_ENQ_FIXUP: begin
+                gc_cmd_valid = 1'b1;
+                gc_cmd_op    = GC_CMD_FIXUP;
+                gc_cmd_arg0  = opb;
+                gc_cmd_arg1  = rf_rd1_data;
+                rf_rd1_addr  = dr.rs2;
+                if (gc_cmd_ready) begin
+                    ns = S_FETCH;
+                end else begin
+                    cyc_inc = 1'b0;
+                    pc_n    = pc;
+                    ns      = S_ENQ_WAIT;
+                end
+            end
+
+            OP_ENQ_COMPACT: begin
+                gc_cmd_valid = 1'b1;
+                gc_cmd_op    = GC_CMD_COMPACT;
+                gc_cmd_arg0  = opb;
+                gc_cmd_arg1  = rf_rd1_data;
+                rf_rd1_addr  = dr.rs2;
+                if (gc_cmd_ready) begin
+                    ns = S_FETCH;
+                end else begin
+                    cyc_inc = 1'b0;
+                    pc_n    = pc;
+                    ns      = S_ENQ_WAIT;
+                end
             end
 
             // ===== FAA / FENCE.GC =====
             OP_FAA_FENCE: begin
                 if (dr.func == FUNC_FENCE_GC) begin
-                    ns = S_FETCH;
+                    // FENCE.GC: wait until all GC engines are idle
+                    // and all pending barrier stores are drained
+                    if (gc_engine_busy) begin
+                        cyc_inc = 1'b0;
+                        pc_n    = pc;
+                        ns      = S_FENCE_GC;
+                    end else begin
+                        ns = S_FETCH;
+                    end
                 end else begin
                     ta_n    = is_any_ref(opb) ? ref_address(opb) : opb;
                     cyc_inc = 1'b0;
@@ -943,11 +1155,43 @@ module lm1_control
             end
 
             // ===== SEND/RECV =====
-            OP_SEND, OP_RECV: begin
-                tc_n    = TRAP_UNIMPLEMENTED;
-                cyc_inc = 1'b0;
-                pc_n    = pc;
-                ns      = S_TRAP_LOOKUP;
+            //
+            // SEND Rd, #queue_id   — send opa (regs[rd]) to queue
+            //   queue_id is in imm16[1:0]
+            //   If queue full → TRAP_QUEUE_FULL
+            //
+            // RECV Rd, #queue_id   — receive from queue into Rd
+            //   queue_id is in imm16[1:0]
+            //   If queue empty → TRAP_QUEUE_EMPTY
+            //
+            OP_SEND: begin
+                mq_wr_id   = dr.imm16[1:0];
+                mq_wr_data = opa;              // regs[rd]
+                if (mq_wr_ready) begin
+                    mq_wr_en = 1'b1;
+                    ns = S_FETCH;
+                end else begin
+                    tc_n    = TRAP_QUEUE_FULL;
+                    cyc_inc = 1'b0;
+                    pc_n    = pc;
+                    ns      = S_TRAP_LOOKUP;
+                end
+            end
+
+            OP_RECV: begin
+                mq_rd_id  = dr.imm16[1:0];
+                if (mq_rd_valid) begin
+                    mq_rd_en  = 1'b1;
+                    rf_we     = 1'b1;
+                    rf_w_addr = dr.rd;
+                    rf_w_data = mq_rd_data;
+                    ns = S_FETCH;
+                end else begin
+                    tc_n    = TRAP_QUEUE_EMPTY;
+                    cyc_inc = 1'b0;
+                    pc_n    = pc;
+                    ns      = S_TRAP_LOOKUP;
+                end
             end
 
             default: begin
@@ -1125,15 +1369,82 @@ module lm1_control
                     rf_we     = 1'b1;
                     rf_w_addr = dr.rd;
                     rf_w_data = lsu_rdata;
+                    ns = S_FETCH;
                 end
                 OP_LI32: begin
                     rf_we     = 1'b1;
                     rf_w_addr = dr.rd;
                     rf_w_data = lsu_rdata;
                     pc_n      = pc + 64'd8;
+                    ns = S_FETCH;
                 end
-                default: ;
+                OP_ST_WB: begin
+                    // Store completed — now check barrier
+                    ns = S_BARRIER_CHECK;
+                end
+                default: begin
+                    ns = S_FETCH;
+                end
                 endcase
+            end
+        end
+
+        // ---------------------------------------------------------
+        // BARRIER_CHECK: decide if card-table mark is needed
+        //
+        // td = stored value (set in S_EXECUTE)
+        // tt = container ref address (set in S_EXECUTE for ST.WB)
+        //
+        // Filter 1: skip if stored value is not a ref
+        // Filter 2: skip if same generation (both nursery or both old)
+        //
+        // A cross-gen store is: container in old-gen AND stored ref
+        // points to nursery.  With gen_boundary configured:
+        //   container_addr >= gen_boundary  AND  ref_addr < gen_boundary
+        // ---------------------------------------------------------
+        S_BARRIER_CHECK: begin
+            if (!is_any_ref(td)) begin
+                // Filter 1: not a ref — no barrier needed
+                ctr_barrier_filt_inc = 1'b1;
+                ns = S_FETCH;
+            end else begin
+                // td is a ref — check generations
+                begin
+                    logic [XLEN-1:0] stored_addr;
+                    stored_addr = ref_address(td);
+                    if (gen_boundary != '0 &&
+                        tt >= gen_boundary &&
+                        stored_addr < gen_boundary) begin
+                        // Cross-gen old→young: FIRE barrier
+                        // Compute card-table byte address:
+                        //   card_index = (container_addr - 0) >> card_shift
+                        //   card_addr  = card_table_base + card_index
+                        ta_n = card_table_base + (tt >> card_shift);
+                        td_n = {56'hFF_FFFF_FFFF_FFFF, 8'hFF};  // dirty marker
+                        ctr_barrier_fire_inc = 1'b1;
+                        ns   = S_BARRIER_MARK;
+                    end else begin
+                        // Same-gen or gen_boundary not configured — filtered
+                        ctr_barrier_filt_inc = 1'b1;
+                        ns = S_FETCH;
+                    end
+                end
+            end
+        end
+
+        // ---------------------------------------------------------
+        // BARRIER_MARK: issue byte store to card table
+        // ---------------------------------------------------------
+        S_BARRIER_MARK: begin
+            lsu_req   = 1'b1;
+            lsu_op    = LSU_STORE64;  // full-word store (card table byte)
+            lsu_addr  = ta;
+            lsu_wdata = td;           // 0xFF..FF (marks card dirty)
+            if (lsu_ready) ns = S_BARRIER_MARK_W;
+        end
+
+        S_BARRIER_MARK_W: begin
+            if (lsu_valid) begin
                 ns = S_FETCH;
             end
         end
@@ -1472,6 +1783,8 @@ module lm1_control
             rf_w_data = make_ref(aa, acon);
             cyc_inc   = 1'b1;
             pc_n      = pc + 64'd4;
+            ctr_alloc_inc       = 1'b1;
+            ctr_alloc_bytes_inc = (anw + 16'd1) << 3;  // (nwords+1)*8
             ns        = S_FETCH;
         end
 
@@ -1572,9 +1885,11 @@ module lm1_control
             OP_CALL_IC: begin
                 if (ic_hit) begin
                     tt_n = ic_hit_target;
+                    ctr_ic_hit_inc = 1'b1;
                     ns   = S_PUSH_FRAME_0;
                 end else begin
                     tc_n = TRAP_IC_MISS;
+                    ctr_ic_miss_inc = 1'b1;
                     ns   = S_TRAP_LOOKUP;
                 end
             end
@@ -1582,14 +1897,45 @@ module lm1_control
                 if (ic_hit) begin
                     pc_n    = ic_hit_target;
                     cyc_inc = 1'b1;
+                    ctr_ic_hit_inc = 1'b1;
                     ns      = S_FETCH;
                 end else begin
                     tc_n = TRAP_IC_MISS;
+                    ctr_ic_miss_inc = 1'b1;
                     ns   = S_TRAP_LOOKUP;
                 end
             end
             default: ns = S_FETCH;
             endcase
+        end
+
+        // ---------------------------------------------------------
+        // ENQ_WAIT: wait for GC engine to accept command
+        // ---------------------------------------------------------
+        S_ENQ_WAIT: begin
+            gc_cmd_valid = 1'b1;
+            gc_cmd_op    = (dr.opcode == OP_ENQ_SCAN)    ? GC_CMD_SCAN :
+                           (dr.opcode == OP_ENQ_COPY)    ? GC_CMD_COPY :
+                           (dr.opcode == OP_ENQ_FIXUP)   ? GC_CMD_FIXUP :
+                                                           GC_CMD_COMPACT;
+            gc_cmd_arg0  = opb;
+            gc_cmd_arg1  = opc;
+            if (gc_cmd_ready) begin
+                cyc_inc = 1'b1;
+                pc_n    = pc + 64'd4;
+                ns      = S_FETCH;
+            end
+        end
+
+        // ---------------------------------------------------------
+        // FENCE_GC: stall until all GC engines are idle
+        // ---------------------------------------------------------
+        S_FENCE_GC: begin
+            if (!gc_engine_busy) begin
+                cyc_inc = 1'b1;
+                pc_n    = pc + 64'd4;
+                ns      = S_FETCH;
+            end
         end
 
         // ---------------------------------------------------------
@@ -1599,6 +1945,10 @@ module lm1_control
             trap_pc_n    = pc;
             trap_cause_n = tc;
             in_trap_n    = 1'b1;
+
+            // Perf counter for nursery overflow
+            if (tc == TRAP_NURSERY_OVERFLOW)
+                ctr_nursery_ovf_inc = 1'b1;
 
             if (trap_tbl != '0 && tc < 8'h80) begin
                 lsu_req  = 1'b1;

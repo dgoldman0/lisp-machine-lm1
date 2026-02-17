@@ -268,6 +268,66 @@ package lm1_pkg;
     parameter logic [7:0] TRAP_UNIMPLEMENTED    = 8'hFE;
 
     // ---------------------------------------------------------------
+    // System-trap sub-codes  (OP_TRAP with imm[7] = 1)
+    //
+    //   0x90  SET_TRAP_TABLE   — r1 → trap_tbl
+    //   0x91  SET_TEMPLATE     — tmpl[r1[7:0]] ← r2
+    //   0x92  SET_CARD_BASE    — r1 → card_table_base cfg register
+    //   0x93  SET_CARD_SHIFT   — r1[5:0] → card_shift (default 6 = 64-byte cards)
+    //   0x94  SET_GEN_BOUNDARY — r1 → gen_boundary (addrs < gen_boundary are nursery)
+    //   0x95  SET_QUEUE_BASE   — r1 → message-queue base address
+    //   0x96  GC_ENGINE_CMD    — enqueue a GC engine command (used by ENQ.*)
+    // ---------------------------------------------------------------
+    parameter logic [7:0] SYS_SET_TRAP_TABLE   = 8'h90;
+    parameter logic [7:0] SYS_SET_TEMPLATE     = 8'h91;
+    parameter logic [7:0] SYS_SET_CARD_BASE    = 8'h92;
+    parameter logic [7:0] SYS_SET_CARD_SHIFT   = 8'h93;
+    parameter logic [7:0] SYS_SET_GEN_BOUNDARY = 8'h94;
+    parameter logic [7:0] SYS_SET_QUEUE_BASE   = 8'h95;
+    parameter logic [7:0] SYS_GC_ENGINE_CMD    = 8'h96;
+
+    // SYS_INFO sub-codes for GC-related queries
+    parameter logic [REG_IDX_W-1:0] SYS_CARD_BASE     = 5'd5;
+    parameter logic [REG_IDX_W-1:0] SYS_CARD_SHIFT    = 5'd6;
+    parameter logic [REG_IDX_W-1:0] SYS_GEN_BOUNDARY  = 5'd7;
+    parameter logic [REG_IDX_W-1:0] SYS_QUEUE_BASE    = 5'd8;
+    parameter logic [REG_IDX_W-1:0] SYS_GC_STATUS     = 5'd9;
+    parameter logic [REG_IDX_W-1:0] SYS_PERF_CTR      = 5'd10;
+
+    // ---------------------------------------------------------------
+    // GC engine command codes  (for ENQ.* opcodes → engine command port)
+    // ---------------------------------------------------------------
+    parameter logic [3:0] GC_CMD_SCAN    = 4'd1;
+    parameter logic [3:0] GC_CMD_COPY    = 4'd2;
+    parameter logic [3:0] GC_CMD_FIXUP   = 4'd3;
+    parameter logic [3:0] GC_CMD_COMPACT = 4'd4;
+    parameter logic [3:0] GC_CMD_FENCE   = 4'd5;
+
+    // ---------------------------------------------------------------
+    // Performance counter IDs
+    // ---------------------------------------------------------------
+    parameter logic [4:0] CTR_ALLOC_COUNT     = 5'd0;
+    parameter logic [4:0] CTR_ALLOC_BYTES     = 5'd1;
+    parameter logic [4:0] CTR_BARRIER_FIRES   = 5'd2;
+    parameter logic [4:0] CTR_BARRIER_FILTERED = 5'd3;
+    parameter logic [4:0] CTR_IC_HITS         = 5'd4;
+    parameter logic [4:0] CTR_IC_MISSES       = 5'd5;
+    parameter logic [4:0] CTR_GC_CYCLES       = 5'd6;
+    parameter logic [4:0] CTR_NURSERY_OVERFLOWS = 5'd7;
+
+    // ---------------------------------------------------------------
+    // Message queue constants
+    // ---------------------------------------------------------------
+    parameter int QUEUE_COUNT    = 4;     // 4 queues per tile
+    parameter int QUEUE_DEPTH    = 512;   // entries per queue
+
+    // Queue IDs (in imm16 field of SEND/RECV)
+    parameter logic [1:0] QUEUE_WORK_IN  = 2'd0;
+    parameter logic [1:0] QUEUE_WORK_OUT = 2'd1;
+    parameter logic [1:0] QUEUE_GC       = 2'd2;
+    parameter logic [1:0] QUEUE_USER     = 2'd3;
+
+    // ---------------------------------------------------------------
     // Decoded instruction — all fields extracted in parallel
     //
     // Fields overlap in the raw instruction word; the execute stage
