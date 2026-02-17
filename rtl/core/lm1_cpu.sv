@@ -113,7 +113,21 @@ module lm1_cpu
     // ---------------------------------------------------------------
     // Decoder: not used as control classification signals
     // ---------------------------------------------------------------
-    // The decoder produces dec + imm_sext from the LSU instruction output.
+    // Instruction latch: capture the 32-bit instruction word from the
+    // LSU when the fetch response is valid.  The decoder is driven from
+    // this register (stable in S_DECODE), not the transient lsu_inst
+    // which is only combinationally valid during LSU_WAIT_RD.
+    // ---------------------------------------------------------------
+    logic [ILEN-1:0] inst_latched;
+    always_ff @(posedge clk) begin
+        if (!rst_n)
+            inst_latched <= '0;
+        else if (lsu_valid)
+            inst_latched <= lsu_inst;
+    end
+
+    // ---------------------------------------------------------------
+    // The decoder produces dec + imm_sext from the latched instruction.
     // The control FSM latches these at decode time.
     logic [REG_IDX_W-1:0] dec_rf_rd, dec_rf_rs1, dec_rf_rs2;
     logic                 dec_rf_we, dec_rf_rd_rs2;
@@ -122,7 +136,7 @@ module lm1_cpu
     logic                 dec_is_alloc, dec_is_multi, dec_is_nop;
 
     lm1_decoder u_decoder (
-        .inst_word   (lsu_inst),
+        .inst_word   (inst_latched),
         .dec         (dec_fields),
         .imm_sext    (dec_imm_sext),
         .rf_rd_idx   (dec_rf_rd),
