@@ -161,7 +161,9 @@ class Compiler:
                       'print-fixnum', 'print', 'newline',
                       'putchar',
                       'string-length', 'string-ref', 'string-set!',
-                      'print-string', 'char->fixnum', 'fixnum->char'):
+                      'print-string', 'char->fixnum', 'fixnum->char',
+                      'make-vector', 'vector-ref', 'vector-set!',
+                      'vector-length'):
             self._builtins.add(name)
 
     def _label(self, prefix: str = "L") -> str:
@@ -874,6 +876,49 @@ class Compiler:
         elif op == 'fixnum->char':
             # Identity
             self._compile_expr(args[0], env, dest=dest)
+        elif op == 'make-vector':
+            # (make-vector n) → ALLOCV with template 2 (vector)
+            # Elements initialized to 0 (fixnum 0)
+            self._compile_expr(args[0], env, dest=self.SCRATCH_REGS[0])
+            self._emit_instr(f"ALLOCV r{dest}, r{self.SCRATCH_REGS[0]}, 2")
+        elif op == 'vector-length':
+            # (vector-length vec) → field 0 = length (tagged fixnum)
+            self._compile_expr(args[0], env, dest=dest)
+            self._emit_instr(f"LD.FLD r{dest}, r{dest}, 0")
+        elif op == 'vector-ref':
+            # (vector-ref vec idx) → element at field (idx+1)
+            # addr = ref_address(vec) + (untag(idx) + 2) * 8
+            #      = (vec & ~7) + idx_tagged * 4 + 16
+            self._compile_expr(args[0], env, dest=self.SCRATCH_REGS[0])  # vec
+            self._compile_expr(args[1], env, dest=self.SCRATCH_REGS[1])  # idx
+            # Strip ref tag
+            self._emit_instr(f"LI r{self.SCRATCH_REGS[2]}, -8")
+            self._emit_instr(f"AND r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[2]}")
+            # offset = idx_tagged * 4 + 16
+            self._emit_instr(f"LI r{self.SCRATCH_REGS[2]}, 4")
+            self._emit_instr(f"MUL r{self.SCRATCH_REGS[1]}, r{self.SCRATCH_REGS[1]}, r{self.SCRATCH_REGS[2]}")
+            self._emit_instr(f"LI r{self.SCRATCH_REGS[2]}, 16")
+            self._emit_instr(f"ADD r{self.SCRATCH_REGS[1]}, r{self.SCRATCH_REGS[1]}, r{self.SCRATCH_REGS[2]}")
+            # Load element
+            self._emit_instr(f"ADD r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[1]}")
+            self._emit_instr(f"LDR r{dest}, r{self.SCRATCH_REGS[0]}, 0")
+        elif op == 'vector-set!':
+            # (vector-set! vec idx val) → store element
+            self._compile_expr(args[0], env, dest=self.SCRATCH_REGS[0])  # vec
+            self._compile_expr(args[1], env, dest=self.SCRATCH_REGS[1])  # idx
+            self._compile_expr(args[2], env, dest=self.SCRATCH_REGS[2])  # val
+            # Strip ref tag
+            self._emit_instr(f"LI r{self.SCRATCH_REGS[3]}, -8")
+            self._emit_instr(f"AND r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[3]}")
+            # offset = idx_tagged * 4 + 16
+            self._emit_instr(f"LI r{self.SCRATCH_REGS[3]}, 4")
+            self._emit_instr(f"MUL r{self.SCRATCH_REGS[1]}, r{self.SCRATCH_REGS[1]}, r{self.SCRATCH_REGS[3]}")
+            self._emit_instr(f"LI r{self.SCRATCH_REGS[3]}, 16")
+            self._emit_instr(f"ADD r{self.SCRATCH_REGS[1]}, r{self.SCRATCH_REGS[1]}, r{self.SCRATCH_REGS[3]}")
+            # Store
+            self._emit_instr(f"ADD r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[1]}")
+            self._emit_instr(f"STR r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[2]}, 0")
+            self._emit_instr(f"LI r{dest}, 5")  # return NIL
         else:
             raise CompilerError(f"Unknown builtin: {op}")
 

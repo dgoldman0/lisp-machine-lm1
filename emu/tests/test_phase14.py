@@ -496,3 +496,76 @@ def test_char_identity():
     out, _ = _compile_direct(forms)
     # print-fixnum(65) = "65", putchar(66) = "B"
     assert out == "65B"
+
+
+# ===================================================================
+# Stage 4: Vectors / arrays
+# ===================================================================
+
+@test("vector_make_length", batch="phase14_stage4")
+def test_vector_make_length():
+    """(make-vector n) allocates; (vector-length v) returns n."""
+    forms = parse("""
+        (defun main ()
+          (let ((v (make-vector 5)))
+            (print-fixnum (vector-length v))))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "5"
+
+
+@test("vector_set_ref", batch="phase14_stage4")
+def test_vector_set_ref():
+    """(vector-set! v i val) + (vector-ref v i) round-trips."""
+    forms = parse("""
+        (defun main ()
+          (let ((v (make-vector 3)))
+            (vector-set! v 0 10)
+            (vector-set! v 1 20)
+            (vector-set! v 2 30)
+            (print-fixnum (vector-ref v 0))
+            (print-fixnum (vector-ref v 1))
+            (print-fixnum (vector-ref v 2))))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "102030"
+
+
+@test("vector_sum_loop", batch="phase14_stage4")
+def test_vector_sum_loop():
+    """Sum elements of a vector using while loop."""
+    forms = parse("""
+        (defun main ()
+          (let* ((v (make-vector 4))
+                 (sum 0)
+                 (i 0))
+            (vector-set! v 0 10)
+            (vector-set! v 1 20)
+            (vector-set! v 2 30)
+            (vector-set! v 3 40)
+            (while (< i (vector-length v))
+              (set! sum (+ sum (vector-ref v i)))
+              (set! i (+ i 1)))
+            (print-fixnum sum)))
+    """)
+    out, _ = _compile_direct(forms)
+    assert out == "100"
+
+
+@test("vector_nested", batch="phase14_stage4")
+def test_vector_nested():
+    """Vector of vectors (2D array simulation)."""
+    forms = parse("""
+        (defun main ()
+          (let* ((row0 (make-vector 2))
+                 (row1 (make-vector 2)))
+            (vector-set! row0 0 1)
+            (vector-set! row0 1 2)
+            (vector-set! row1 0 3)
+            (vector-set! row1 1 4)
+            (print-fixnum (+ (vector-ref row0 0)
+                            (vector-ref row1 1)))))
+    """)
+    out, _ = _compile_direct(forms)
+    # 1 + 4 = 5
+    assert out == "5"
