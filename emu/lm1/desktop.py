@@ -593,6 +593,9 @@ class AES:
         # Taskbar state
         self._taskbar_buttons: list[Window] = []   # refreshed each redraw
 
+        # Tick objects (crystallites with tick() method)
+        self._tick_objects: list = []
+
         # Runtime
         self._running = True
         self._dirty = True
@@ -634,6 +637,9 @@ class AES:
             self._windows.remove(win)
         if self._focused is win:
             self._focused = self._windows[-1] if self._windows else None
+        # Remove any tick objects associated with this window
+        self._tick_objects = [t for t in self._tick_objects
+                              if not (hasattr(t, 'win') and t.win is win)]
         self._dirty = True
 
     def raise_window(self, win: Window) -> None:
@@ -1653,6 +1659,7 @@ class ClockCrystallite:
         self.win._cryst_type = 'clock'
         self._update_interval = 1.0
         self._last_update = 0.0
+        aes._tick_objects.append(self)
 
     def _redraw(self, vdi: VDI, win: Window) -> None:
         cx, cy, cw, ch = win.client_rect()
@@ -2842,17 +2849,19 @@ def launch_desktop(width: int = 1024, height: int = 768,
     import pygame
     aes.redraw()
 
+    pg_clock = pygame.time.Clock()
     while aes._running:
         evt_type, d1, d2 = vdi.read_event()
         while evt_type != EVT_NONE:
             aes.handle_event(evt_type, d1, d2)
             evt_type, d1, d2 = vdi.read_event()
 
-        clock.tick()
+        for ticker in aes._tick_objects:
+            ticker.tick()
 
         if aes._dirty:
             aes.redraw()
 
-        pygame.time.Clock().tick(30)
+        pg_clock.tick(30)
 
     vdi.close()
