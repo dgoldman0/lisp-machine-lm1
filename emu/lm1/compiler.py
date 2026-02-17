@@ -155,7 +155,10 @@ class Compiler:
         # Register inline builtins
         for name in ('car', 'cdr', 'cons', '+', '-', '*', '/', 'eq',
                       'null', 'atom', 'not', 'fixnump', 'consp',
-                      'set-car!', 'set-cdr!', '=', '<', '>'):
+                      'set-car!', 'set-cdr!', '=', '<', '>',
+                      '>=', '<=', 'mod', 'rem',
+                      'print-fixnum', 'print', 'newline',
+                      'putchar'):
             self._builtins.add(name)
 
     def _label(self, prefix: str = "L") -> str:
@@ -175,8 +178,29 @@ class Compiler:
         self._emit(f"    ; {text}")
 
     def get_output(self) -> str:
-        """Return accumulated assembly text."""
-        return '\n'.join(self.lines) + '\n'
+        """Return accumulated assembly text, including data section."""
+        result = list(self.lines)
+        # Emit string table data section
+        if self._string_table:
+            result.append("")
+            result.append("; ===== String Data =====")
+            for label, text in self._string_table:
+                result.append(f"{label}:")
+                # Encode as: length word, then characters as bytes, then padding
+                encoded = text.encode('utf-8')
+                result.append(f"    .WORD {len(encoded)}")
+                for ch in encoded:
+                    result.append(f"    .BYTE {ch}")
+                result.append(f"    .BYTE 0")  # null terminator
+                result.append(f"    .ALIGN 8")
+        # Emit global variable storage
+        if self._globals:
+            result.append("")
+            result.append("; ===== Global Variables =====")
+            for name, label in self._globals.items():
+                result.append(f"{label}:")
+                result.append(f"    .WORD 5")  # initialized to NIL
+        return '\n'.join(result) + '\n'
 
     # ------------------------------------------------------------------
     # Top-level compilation
@@ -332,6 +356,20 @@ class Compiler:
             return self._compile_or(form, env, dest)
         if op == 'set!':
             return self._compile_set(form, env, dest)
+        if op == 'while':
+            return self._compile_while(form, env, dest)
+        if op == 'let*':
+            return self._compile_let_star(form, env, dest)
+        if op == 'when':
+            # (when test body...) → (if test (progn body...) nil)
+            return self._compile_if(['if', form[1], ['progn'] + form[2:]], env, dest)
+        if op == 'unless':
+            # (unless test body...) → (if test nil (progn body...))
+            return self._compile_if(['if', form[1], None, ['progn'] + form[2:]], env, dest)
+        if op == 'dotimes':
+            return self._compile_dotimes(form, env, dest)
+        if op == '__string__':
+            return self._compile_string_literal(form, env, dest)
 
         # Inline builtins (arithmetic, cons, car, cdr, etc.)
         if isinstance(op, str) and op in self._builtins:
@@ -520,6 +558,98 @@ class Compiler:
         else:
             raise CompilerError(f"set!: undefined variable: {var}")
 
+    def _compile_while(self, form: list, env: dict, dest: int) -> None:
+        """(while test body...) — iteration without recursion."""
+        top_label = self._label("while_top")
+        end_label = self._label("while_end")
+
+        self._emit_label(top_label)
+        # Evaluate test
+        self._compile_expr(form[1], env, dest=dest)
+        self._emit_instr(f"BR.NIL r{dest}, {end_label}")
+        # Body
+        for e in form[2:]:
+            self._compile_expr(e, env, dest=dest)
+        self._emit_instr(f"BR {top_label}")
+        self._emit_label(end_label)
+        # while returns nil
+        self._emit_instr(f"LI r{dest}, 5")
+
+    def _compile_let_star(self, form: list, env: dict, dest: int) -> None:
+        """(let* ((var1 val1) (var2 val2) ...) body...)
+
+        Like let, but each binding is visible to subsequent bindings.
+        """
+        bindings = form[1]
+        body = form[2:]
+        new_env = dict(env)
+
+        for binding in bindings:
+            var = binding[0]
+            val_expr = binding[1]
+            reg = self._alloc_save_reg(new_env)
+            self._compile_expr(val_expr, new_env, dest=reg)
+            new_env[var] = reg
+
+        for i, e in enumerate(body):
+            d = dest if i == len(body) - 1 else self.SCRATCH_REGS[0]
+            self._compile_expr(e, new_env, dest=d)
+
+    def _compile_dotimes(self, form: list, env: dict, dest: int) -> None:
+        """(dotimes (var count) body...)
+
+        Iterates var from 0 to count-1.
+        """
+        var_spec = form[1]  # (var count)
+        var = var_spec[0]
+        count_expr = var_spec[1]
+        body = form[2:]
+
+        new_env = dict(env)
+        # Allocate registers for counter and limit
+        counter_reg = self._alloc_save_reg(new_env)
+        new_env[var] = counter_reg
+        limit_reg = self._alloc_save_reg(new_env)
+
+        # Initialize counter to fixnum 0
+        self._emit_instr(f"LI r{counter_reg}, 0")
+        # Evaluate count
+        self._compile_expr(count_expr, env, dest=limit_reg)
+
+        top_label = self._label("dotimes_top")
+        body_label = self._label("dotimes_body")
+        end_label = self._label("dotimes_end")
+
+        self._emit_label(top_label)
+        # Compare counter < limit
+        self._emit_instr(f"CMP r{self.SCRATCH_REGS[0]}, r{counter_reg}, r{limit_reg}")
+        self._emit_instr(f"BR.FIX.LT r{self.SCRATCH_REGS[0]}, {body_label}")
+        self._emit_instr(f"BR {end_label}")
+        self._emit_label(body_label)
+
+        # Body
+        for e in body:
+            self._compile_expr(e, new_env, dest=self.SCRATCH_REGS[0])
+
+        # Increment counter (add fixnum 1 = tagged 2)
+        self._emit_instr(f"ADD.FIX.IMM r{counter_reg}, r{counter_reg}, 2")
+        self._emit_instr(f"BR {top_label}")
+        self._emit_label(end_label)
+        # dotimes returns nil
+        self._emit_instr(f"LI r{dest}, 5")
+
+    def _compile_string_literal(self, form: list, env: dict, dest: int) -> None:
+        """Compile a string literal ['__string__', 'text'].
+
+        Stores the string in the data section and loads its address.
+        String format: length (8 bytes) followed by character data.
+        """
+        text = form[1]
+        label = self._label("str")
+        self._string_table.append((label, text))
+        # Load address of string data
+        self._emit_instr(f"LI r{dest}, {label}")
+
     # ------------------------------------------------------------------
     # Built-in operations (inlined)
     # ------------------------------------------------------------------
@@ -626,6 +756,54 @@ class Compiler:
             self._emit_instr(f"POP r{self.SCRATCH_REGS[0]}")
             self._emit_instr(f"ST.CDR r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[1]}")
             self._emit_instr(f"MOV r{dest}, r{self.SCRATCH_REGS[1]}")
+        elif op == '>=':
+            # (>= a b) → NOT (< a b) → CMP; if LT → NIL, else T
+            self._compile_expr(args[0], env, dest=dest)
+            self._emit_instr(f"PUSH r{dest}")
+            self._compile_expr(args[1], env, dest=self.SCRATCH_REGS[1])
+            self._emit_instr(f"POP r{self.SCRATCH_REGS[0]}")
+            self._emit_instr(f"CMP r{dest}, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[1]}")
+            lt_label = self._label("ge_no")
+            end_label = self._label("ge_end")
+            self._emit_instr(f"BR.FIX.LT r{dest}, {lt_label}")
+            self._emit_instr(f"LI r{dest}, 13")  # T (>=)
+            self._emit_instr(f"BR {end_label}")
+            self._emit_label(lt_label)
+            self._emit_instr(f"LI r{dest}, 5")   # NIL (<)
+            self._emit_label(end_label)
+        elif op == '<=':
+            # (<= a b) → NOT (> a b) → CMP; if GT → NIL, else T
+            self._compile_expr(args[0], env, dest=dest)
+            self._emit_instr(f"PUSH r{dest}")
+            self._compile_expr(args[1], env, dest=self.SCRATCH_REGS[1])
+            self._emit_instr(f"POP r{self.SCRATCH_REGS[0]}")
+            self._emit_instr(f"CMP r{dest}, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[1]}")
+            gt_label = self._label("le_no")
+            end_label = self._label("le_end")
+            self._emit_instr(f"BR.FIX.GT r{dest}, {gt_label}")
+            self._emit_instr(f"LI r{dest}, 13")  # T (<=)
+            self._emit_instr(f"BR {end_label}")
+            self._emit_label(gt_label)
+            self._emit_instr(f"LI r{dest}, 5")   # NIL (>)
+            self._emit_label(end_label)
+        elif op == 'mod' or op == 'rem':
+            # (mod a b) → a - (a / b) * b (integer modulo via tagged arith)
+            # Eval a, push; eval b
+            self._compile_expr(args[0], env, dest=dest)
+            self._emit_instr(f"PUSH r{dest}")
+            self._compile_expr(args[1], env, dest=self.SCRATCH_REGS[1])
+            self._emit_instr(f"POP r{self.SCRATCH_REGS[0]}")
+            # scratch[0] = a, scratch[1] = b
+            # scratch[2] = a / b
+            self._emit_instr(f"DIV.FIX r{self.SCRATCH_REGS[2]}, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[1]}")
+            # scratch[2] = (a / b) * b
+            self._emit_instr(f"MUL.FIX r{self.SCRATCH_REGS[2]}, r{self.SCRATCH_REGS[2]}, r{self.SCRATCH_REGS[1]}")
+            # dest = a - (a / b) * b
+            self._emit_instr(f"SUB.FIX r{dest}, r{self.SCRATCH_REGS[0]}, r{self.SCRATCH_REGS[2]}")
+        elif op in ('print-fixnum', 'print', 'newline', 'putchar'):
+            # These are inlined as CALL.DIRECT to the runtime functions
+            self._compile_call([op] + args, env, dest)
+            return
         else:
             raise CompilerError(f"Unknown builtin: {op}")
 
