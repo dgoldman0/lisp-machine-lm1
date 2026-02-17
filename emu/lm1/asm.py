@@ -456,6 +456,37 @@ class Assembler:
             return encode_s(Op.STR, rs, rt, 0, off)
 
         # ---------------------------------------------------------------
+        # Sub-word loads/stores: LDB, LDH, LDW, STB, STH, STW
+        # ---------------------------------------------------------------
+        if mn == 'LDB':
+            rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
+            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
+            return encode_i(Op.LDB, rd, rs1, off)
+        if mn == 'LDH':
+            rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
+            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
+            return encode_i(Op.LDH, rd, rs1, off)
+        if mn == 'LDW':
+            rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
+            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
+            return encode_i(Op.LDW, rd, rs1, off)
+        if mn == 'STB':
+            rs = self._reg(args[0], ln)
+            rt = self._reg(args[1], ln)
+            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
+            return encode_s(Op.STB, rs, rt, 0, off)
+        if mn == 'STH':
+            rs = self._reg(args[0], ln)
+            rt = self._reg(args[1], ln)
+            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
+            return encode_s(Op.STH, rs, rt, 0, off)
+        if mn == 'STW':
+            rs = self._reg(args[0], ln)
+            rt = self._reg(args[1], ln)
+            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
+            return encode_s(Op.STW, rs, rt, 0, off)
+
+        # ---------------------------------------------------------------
         # LI, LUI
         # ---------------------------------------------------------------
         if mn == 'LI':

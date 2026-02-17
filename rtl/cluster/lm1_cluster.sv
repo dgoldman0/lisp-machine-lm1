@@ -79,6 +79,10 @@ module lm1_cluster
     logic [TILES_PER_CLUSTER-1:0]     tile_gc_cmd_ready;
     logic                             gc_busy;
 
+    // Scanner result FIFO — shared outputs to all tiles, pop from any tile
+    logic [TILES_PER_CLUSTER-1:0]     tile_scan_fifo_pop;
+    logic                             scan_fifo_pop_any;
+
     // ---------------------------------------------------------------
     // Tile instances
     // ---------------------------------------------------------------
@@ -119,6 +123,12 @@ module lm1_cluster
                 .gc_cmd_arg2    (tile_gc_cmd_arg2[t]),
                 .gc_cmd_ready   (tile_gc_cmd_ready[t]),
                 .gc_engine_busy (gc_busy),
+                // Scanner result FIFO (shared, broadcast to all tiles)
+                .scan_fifo_count     (scan_fifo_count),
+                .scan_fifo_head_obj  (scan_fifo_head_obj),
+                .scan_fifo_head_field(scan_fifo_head_field),
+                .scan_fifo_head_ref  (scan_fifo_head_ref),
+                .scan_fifo_pop       (tile_scan_fifo_pop[t]),
                 // NoC message port — tied off for now (NoC stub)
                 .noc_mq_wr_en   (1'b0),
                 .noc_mq_wr_id   (2'b0),
@@ -190,8 +200,8 @@ module lm1_cluster
         .b_en    (gc_mem_rd_en | gc_mem_wr_en),
         .b_we    (gc_mem_wr_en),
         .b_be    ({(XLEN/8){1'b1}}),
-        .b_addr  (gc_mem_wr_en ? gc_mem_wr_addr[CLUSTER_MEM_LOG2-1:0]
-                               : gc_mem_rd_addr[CLUSTER_MEM_LOG2-1:0]),
+        .b_addr  (gc_mem_wr_en ? gc_mem_wr_addr[CLUSTER_MEM_LOG2+2:3]
+                               : gc_mem_rd_addr[CLUSTER_MEM_LOG2+2:3]),
         .b_wdata (gc_mem_wr_data),
         .b_rdata (csram_rdata_b)
     );
@@ -260,6 +270,19 @@ module lm1_cluster
     logic [6:0] scan_fifo_wr, scan_fifo_rd;
     logic [7:0] scan_fifo_count;
 
+    // FIFO head outputs (broadcast to all tiles)
+    logic [XLEN-1:0] scan_fifo_head_obj;
+    logic [15:0]     scan_fifo_head_field;
+    logic [XLEN-1:0] scan_fifo_head_ref;
+
+    wire [SCAN_ENTRY_W-1:0] scan_fifo_head = scan_fifo[scan_fifo_rd];
+    assign scan_fifo_head_obj   = scan_fifo_head[SCAN_ENTRY_W-1 -: XLEN];
+    assign scan_fifo_head_field = scan_fifo_head[XLEN+15 : XLEN];
+    assign scan_fifo_head_ref   = scan_fifo_head[XLEN-1 : 0];
+
+    // Pop if any tile requests it
+    assign scan_fifo_pop_any = |tile_scan_fifo_pop;
+
     assign scan_res_ready = (scan_fifo_count < SCAN_FIFO_DEPTH[7:0]);
 
     always_ff @(posedge clk or negedge rst_n) begin
@@ -268,13 +291,20 @@ module lm1_cluster
             scan_fifo_rd    <= '0;
             scan_fifo_count <= '0;
         end else begin
-            if (scan_res_valid && scan_res_ready) begin
+            // Simultaneous push and pop
+            if (scan_res_valid && scan_res_ready && scan_fifo_pop_any && scan_fifo_count != 8'd0) begin
                 scan_fifo[scan_fifo_wr] <= {scan_res_obj, scan_res_field, scan_res_ref};
                 scan_fifo_wr <= scan_fifo_wr + 7'd1;
-                if (scan_fifo_count < SCAN_FIFO_DEPTH[7:0])
-                    scan_fifo_count <= scan_fifo_count + 8'd1;
+                scan_fifo_rd <= scan_fifo_rd + 7'd1;
+                // count stays the same (push + pop)
+            end else if (scan_res_valid && scan_res_ready) begin
+                scan_fifo[scan_fifo_wr] <= {scan_res_obj, scan_res_field, scan_res_ref};
+                scan_fifo_wr <= scan_fifo_wr + 7'd1;
+                scan_fifo_count <= scan_fifo_count + 8'd1;
+            end else if (scan_fifo_pop_any && scan_fifo_count != 8'd0) begin
+                scan_fifo_rd <= scan_fifo_rd + 7'd1;
+                scan_fifo_count <= scan_fifo_count - 8'd1;
             end
-            // Runtime drains scan FIFO via a separate interface (not yet exposed)
         end
     end
 

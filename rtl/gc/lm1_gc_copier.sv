@@ -121,12 +121,13 @@ module lm1_gc_copier
                         word_idx <= 16'd0;
                         st       <= COPY_HDR;
                     end else begin
-                        // Already forwarded or not a header — skip
-                        if (is_header(mem_rd_data))
-                            src_addr <= src_addr +
-                                        {45'b0, header_size(mem_rd_data) + 16'd1, 3'b0};
-                        else
-                            src_addr <= src_addr + 64'd8;
+                        // Already forwarded or not a header — skip one word.
+                        // NOTE: for forwarded headers, header_size() would
+                        // extract address bits (not size) from the fwd ptr,
+                        // so we always advance word-by-word.  Subsequent
+                        // payload words are not headers and will be skipped
+                        // one at a time until the next real header.
+                        src_addr <= src_addr + 64'd8;
                         st <= READ_HDR;
                     end
                 end

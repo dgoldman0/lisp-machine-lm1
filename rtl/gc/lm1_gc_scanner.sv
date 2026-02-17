@@ -115,8 +115,8 @@ module lm1_gc_scanner
             end
 
             READ_FIELD: begin
-                if (field_idx >= obj_size) begin
-                    // All fields scanned, move to next object
+                if (field_idx >= obj_size || cur_addr >= region_end) begin
+                    // All fields scanned or hit region boundary
                     st <= READ_HDR;
                 end else begin
                     st <= WAIT_FIELD;
@@ -157,7 +157,8 @@ module lm1_gc_scanner
 
     // Memory read control
     assign mem_rd_en   = (st == READ_HDR && cur_addr < region_end) ||
-                         (st == READ_FIELD && field_idx < obj_size);
+                         (st == READ_FIELD && field_idx < obj_size &&
+                          cur_addr < region_end);
     assign mem_rd_addr = cur_addr;
 
     // Result output

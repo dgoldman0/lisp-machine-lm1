@@ -24,6 +24,11 @@ module lm1_gc_fixup
     input  logic [XLEN-1:0]   cmd_region_base,  // region to fixup
     input  logic [XLEN-1:0]   cmd_region_size,  // size in bytes
 
+    // Forwarding source region (latched from last copier command)
+    // Only follow refs pointing into this range.
+    input  logic [XLEN-1:0]   fwd_region_base,
+    input  logic [XLEN-1:0]   fwd_region_end,
+
     // Memory read port
     output logic               mem_rd_en,
     output logic [XLEN-1:0]   mem_rd_addr,
@@ -65,8 +70,8 @@ module lm1_gc_fixup
     // Extract new address from forwarding pointer
     function automatic logic [XLEN-1:0] fwd_new_addr(logic [XLEN-1:0] fwd);
         // The forwarding pointer was built as {0xFF, new_addr[55:3], TAG_HEADER}
-        // So the embedded address is in bits [58:3], shifted left 3
-        return {5'b0, fwd[58:3], 3'b0};
+        // Address occupies bits [55:3] (53 bits).  Bits [63:56] are gc_bits=0xFF.
+        return {8'b0, fwd[55:3], 3'b0};
     endfunction
 
     // Build an updated ref: same tag, new address from fwd
@@ -113,8 +118,15 @@ module lm1_gc_fixup
 
             CHECK_REF: begin
                 if (is_any_ref(cur_word)) begin
-                    // This word is a ref — check its target's header for fwd
-                    st <= READ_TARGET_HDR;
+                    // Only follow refs that point into the copier's source
+                    // region where forwarding pointers were installed.
+                    // Refs to other regions are live and should not be touched.
+                    logic [XLEN-1:0] ref_addr;
+                    ref_addr = ref_address(cur_word);
+                    if (ref_addr >= fwd_region_base && ref_addr < fwd_region_end)
+                        st <= READ_TARGET_HDR;
+                    else
+                        st <= ADVANCE;
                 end else begin
                     // Not a ref — skip
                     st <= ADVANCE;

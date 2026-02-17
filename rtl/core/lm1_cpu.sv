@@ -63,6 +63,13 @@ module lm1_cpu
     input  logic               gc_cmd_ready,
     input  logic               gc_engine_busy,
 
+    // --- Scanner result FIFO (cluster → CPU for draining) ---
+    input  logic [7:0]         scan_fifo_count,
+    input  logic [XLEN-1:0]   scan_fifo_head_obj,
+    input  logic [15:0]        scan_fifo_head_field,
+    input  logic [XLEN-1:0]   scan_fifo_head_ref,
+    output logic               scan_fifo_pop,
+
     // --- External message queue port (NoC ↔ queue) ---
     input  logic               ext_mq_wr_en,
     input  logic [1:0]         ext_mq_wr_id,
@@ -472,6 +479,12 @@ module lm1_cpu
         .gc_cmd_arg2  (gc_cmd_arg2),
         .gc_cmd_ready (gc_cmd_ready),
         .gc_engine_busy(gc_engine_busy),
+        // Scanner result FIFO
+        .scan_fifo_count     (scan_fifo_count),
+        .scan_fifo_head_obj  (scan_fifo_head_obj),
+        .scan_fifo_head_field(scan_fifo_head_field),
+        .scan_fifo_head_ref  (scan_fifo_head_ref),
+        .scan_fifo_pop       (scan_fifo_pop),
         // Perf counter read
         .ctr_id       (ctr_id),
         .ctr_value    (ctr_value),

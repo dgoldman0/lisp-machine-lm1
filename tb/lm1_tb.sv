@@ -80,6 +80,12 @@ module lm1_tb;
         .gc_cmd_arg2   (gc_cmd_arg2),
         .gc_cmd_ready  (1'b1),
         .gc_engine_busy(1'b0),
+        // Scanner result FIFO — stubbed (no cluster in standalone test)
+        .scan_fifo_count     (8'd0),
+        .scan_fifo_head_obj  ({XLEN{1'b0}}),
+        .scan_fifo_head_field(16'd0),
+        .scan_fifo_head_ref  ({XLEN{1'b0}}),
+        .scan_fifo_pop       (),
         // External message queue — not connected
         .ext_mq_wr_en  (1'b0),
         .ext_mq_wr_id  (2'b0),

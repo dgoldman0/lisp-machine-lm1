@@ -61,6 +61,11 @@ EMU_TRAP_VDI       = 0x83
 EMU_TRAP_MEM_BYTE  = 0x84  # Byte-level memory: r1=sub(0=load,1=store), r2=addr, r3=offset, r4=value
 EMU_TRAP_SET_TRAP_TABLE = 0x90    # BIOS: r1 = trap table base address
 EMU_TRAP_SET_TEMPLATE   = 0x91   # BIOS: r1 = index, r2 = 64-bit header value
+EMU_TRAP_SET_CARD_BASE  = 0x92   # r1 = card table base address
+EMU_TRAP_SET_CARD_SHIFT = 0x93   # r1 = card shift (bits 5:0)
+EMU_TRAP_SET_GEN_BOUNDARY = 0x94 # r1 = generation boundary address
+EMU_TRAP_SET_QUEUE_BASE = 0x95   # r1 = queue base address
+EMU_TRAP_GC_ENGINE_CMD  = 0x96   # r1 = GC engine command
 EMU_TRAP_DEBUG_PRINT    = 0x9F   # Debug: print string (r1=addr, r2=len)
 
 # Block I/O sub-functions (in r1)
@@ -85,8 +90,8 @@ class Emulator:
     DEFAULT_OLDGEN_BASE   = 0x0008_0000   # 512 KiB offset
     DEFAULT_OLDGEN_SIZE   = 0x0004_0000   # 256 KiB
 
-    # Card table: one byte per 256-byte card (covers nursery + old-gen)
-    CARD_SIZE = 256  # bytes per card
+    # Card table: one byte per card (card size = 1 << card_shift)
+    DEFAULT_CARD_SHIFT = 6  # 64 bytes per card (matches RTL default)
 
     # Queue depth (per queue, per tile)
     QUEUE_DEPTH = 512
@@ -132,10 +137,16 @@ class Emulator:
         self.oldgen_size = oldgen_size if oldgen_size is not None else self.DEFAULT_OLDGEN_SIZE
         self.oldgen_ptr = self.oldgen_base  # bump pointer into old-gen
 
-        # Card table: one byte per CARD_SIZE bytes of heap memory.
-        # Covers the entire memory space.  A card is "dirty" (non-zero) when
-        # a store-with-barrier writes a nursery ref into an old-gen object.
-        self.card_table_size = mem_size // self.CARD_SIZE
+        # Write barrier configuration (matches RTL registers)
+        self.card_shift = self.DEFAULT_CARD_SHIFT     # bits; card_size = 1 << card_shift
+        self.card_table_base = 0                       # physical address of card table in memory
+        self.gen_boundary = self.nursery_base           # addresses >= gen_boundary are old-gen
+
+        # Card table: one byte per card.  Covers the entire memory space.
+        # A card is "dirty" (0xFF) when a store-with-barrier writes a
+        # young ref into an old-gen object.  Uses configurable card_shift.
+        card_size = 1 << self.card_shift
+        self.card_table_size = mem_size // card_size
         self.card_table = bytearray(self.card_table_size)
 
         # GC statistics
@@ -328,6 +339,37 @@ class Emulator:
             addr = (base + offset) & WORD_MASK
             self.mem.store_word(addr & ~7, val)
 
+        # ---- Sub-word loads (LDB / LDH / LDW) ----
+        elif op == Op.LDB:
+            base = t.regs[inst.rs1]
+            addr = (base + inst.imm16) & WORD_MASK
+            t.regs[inst.rd] = self.mem.load_byte(addr)
+        elif op == Op.LDH:
+            base = t.regs[inst.rs1]
+            addr = (base + inst.imm16) & WORD_MASK & ~1
+            t.regs[inst.rd] = self.mem.load_u16(addr)
+        elif op == Op.LDW:
+            base = t.regs[inst.rs1]
+            addr = (base + inst.imm16) & WORD_MASK & ~3
+            t.regs[inst.rd] = self.mem.load_u32_data(addr)
+
+        # ---- Sub-word stores (STB / STH / STW) ----
+        elif op == Op.STB:
+            base = t.regs[inst.rd]
+            val = t.regs[inst.rs1]
+            addr = (base + inst.imm16) & WORD_MASK
+            self.mem.store_byte(addr, val & 0xFF)
+        elif op == Op.STH:
+            base = t.regs[inst.rd]
+            val = t.regs[inst.rs1]
+            addr = (base + inst.imm16) & WORD_MASK & ~1
+            self.mem.store_u16(addr, val & 0xFFFF)
+        elif op == Op.STW:
+            base = t.regs[inst.rd]
+            val = t.regs[inst.rs1]
+            addr = (base + inst.imm16) & WORD_MASK & ~3
+            self.mem.store_u32_data(addr, val & 0xFFFF_FFFF)
+
         # ---- LI (load immediate) ----
         elif op == Op.LI:
             # imm16 is sign-extended to 64 bits
@@ -460,6 +502,16 @@ class Emulator:
                 case 2:  t.regs[inst.rd] = t.cycle_count & WORD_MASK
                 case 3:  t.regs[inst.rd] = t.trap_cause    # TRAP_CAUSE
                 case 4:  t.regs[inst.rd] = t.trap_pc       # TRAP_PC
+                case 5:  t.regs[inst.rd] = self.card_table_base   # CARD_BASE
+                case 6:  t.regs[inst.rd] = self.card_shift        # CARD_SHIFT
+                case 7:  t.regs[inst.rd] = self.gen_boundary      # GEN_BOUNDARY
+                case 8:  t.regs[inst.rd] = 0                      # QUEUE_BASE (stub)
+                case 9:  t.regs[inst.rd] = 0                      # GC_STATUS (stub)
+                case 10: t.regs[inst.rd] = 0                      # PERF_CTR (stub)
+                case 11: t.regs[inst.rd] = 0                      # SCAN_COUNT (stub)
+                case 12: t.regs[inst.rd] = 0                      # SCAN_HEAD_OBJ (stub)
+                case 13: t.regs[inst.rd] = 0                      # SCAN_HEAD_FIELD (stub)
+                case 14: t.regs[inst.rd] = 0                      # SCAN_POP_REF (stub)
 
         # ---- HALT / NOP ----
         elif op == Op.HALT_NOP:
@@ -652,7 +704,7 @@ class Emulator:
             # mark the card table entry for the object's address.
             self._write_barrier(addr, val)
 
-        # ---- ST.CAR / ST.CDR (with write barrier) ----
+        # ---- ST.CAR / ST.CDR (NO write barrier — matches RTL) ----
         elif op == Op.ST_CAR_CDR:
             obj_ref = t.regs[inst.rd]
             val = t.regs[inst.rs1]
@@ -661,7 +713,8 @@ class Emulator:
                 raise LM1Trap(TRAP_NOT_REF, "ST.CAR/CDR: target is not a ref")
             addr = ref_address(obj_ref)
             self.mem.store_word(addr + (selector + 1) * 8, val)
-            self._write_barrier(addr, val)
+            # Note: RTL does NOT fire the write barrier for ST.CAR/CDR.
+            # Use ST.WB if barrier is needed.
 
         # ---- TST.SHAPE Rd, Rs, #shape_id ----
         elif op == Op.TST_SHAPE:
@@ -916,23 +969,34 @@ class Emulator:
     # -- Allocation helpers (Phase 2) ---
 
     def _write_barrier(self, obj_addr: int, stored_val: int) -> None:
-        """Card-table write barrier.
+        """Card-table write barrier (matches RTL S_BARRIER_CHECK / S_BARRIER_MARK).
 
-        If *stored_val* is a nursery reference and *obj_addr* lives in old-gen,
-        mark the card covering *obj_addr* as dirty so the GC knows to scan it.
+        Fires when:
+          1. stored_val is a ref (any tag with bit0=1 except specials & headers)
+          2. obj_addr >= gen_boundary  (container is in old-gen)
+          3. ref_address(stored_val) < gen_boundary  (value is in young-gen)
+
+        Action: writes 0xFF to the card-table byte at
+                card_table_base + (obj_addr >> card_shift)
+                using a byte-store (matching RTL's LSU_STORE_BYTE).
         """
         if not is_any_ref(stored_val):
             return
         val_addr = ref_address(stored_val)
-        # Is the stored value pointing into the nursery?
-        if not (self.nursery_base <= val_addr < self.nursery_base + self.nursery_size):
-            return
-        # Is the object in old-gen (or at least outside the nursery)?
-        if self.nursery_base <= obj_addr < self.nursery_base + self.nursery_size:
-            return  # both in nursery — no barrier needed
-        card_idx = obj_addr // self.CARD_SIZE
+        # RTL filter: container in old-gen, value in young-gen
+        if obj_addr < self.gen_boundary:
+            return   # container is in young-gen — no barrier
+        if val_addr >= self.gen_boundary:
+            return   # value is also in old-gen — no cross-gen store
+        # Mark the card as dirty (0xFF, matching RTL)
+        card_idx = obj_addr >> self.card_shift
+        if self.card_table_base != 0:
+            # Write 0xFF to physical card-table address in memory
+            card_addr = self.card_table_base + card_idx
+            self.mem.store_byte(card_addr, 0xFF)
+        # Also update internal card table for GC use
         if card_idx < self.card_table_size:
-            self.card_table[card_idx] = 1
+            self.card_table[card_idx] = 0xFF
 
     def _bump_alloc(self, t: ThreadContext, total_bytes: int) -> int:
         """Bump-allocate `total_bytes` from the nursery.
@@ -1195,6 +1259,31 @@ class Emulator:
             idx = t.regs[1] & 0xFF
             val = t.regs[2]
             t.header_templates[idx] = val
+
+        elif code == EMU_TRAP_SET_CARD_BASE:
+            # Set card table base address (matches RTL SYS_SET_CARD_BASE)
+            self.card_table_base = t.regs[1]
+
+        elif code == EMU_TRAP_SET_CARD_SHIFT:
+            # Set card shift (matches RTL SYS_SET_CARD_SHIFT)
+            self.card_shift = t.regs[1] & 0x3F
+            # Rebuild internal card table with new card size
+            card_size = 1 << self.card_shift
+            self.card_table_size = self.mem._size // card_size
+            self.card_table = bytearray(self.card_table_size)
+
+        elif code == EMU_TRAP_SET_GEN_BOUNDARY:
+            # Set generation boundary (matches RTL SYS_SET_GEN_BOUNDARY)
+            self.gen_boundary = t.regs[1]
+
+        elif code == EMU_TRAP_SET_QUEUE_BASE:
+            # Set queue base (matches RTL SYS_SET_QUEUE_BASE)
+            # Not directly used in emulator (queues are software-modeled)
+            pass
+
+        elif code == EMU_TRAP_GC_ENGINE_CMD:
+            # GC engine command (no-op in emulator — GC engines are HW-only)
+            pass
 
         elif code == EMU_TRAP_VDI:
             self._handle_vdi_trap()

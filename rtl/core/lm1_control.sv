@@ -96,6 +96,13 @@ module lm1_control
     input  logic                gc_cmd_ready,     // engine accepts command
     input  logic                gc_engine_busy,   // any engine currently active
 
+    // -- Scanner result FIFO (cluster → CPU) --
+    input  logic [7:0]          scan_fifo_count,
+    input  logic [XLEN-1:0]    scan_fifo_head_obj,
+    input  logic [15:0]         scan_fifo_head_field,
+    input  logic [XLEN-1:0]    scan_fifo_head_ref,
+    output logic                scan_fifo_pop,     // pulse to pop head entry
+
     // -- Performance counter read port --
     output logic [4:0]         ctr_id,
     input  logic [XLEN-1:0]    ctr_value,
@@ -501,6 +508,7 @@ module lm1_control
         gc_cmd_arg0  = '0;
         gc_cmd_arg1  = '0;
         gc_cmd_arg2  = '0;
+        scan_fifo_pop = 1'b0;
 
         // Perf counter defaults
         ctr_id               = '0;
@@ -1188,6 +1196,13 @@ module lm1_control
                     SYS_GEN_BOUNDARY: rf_w_data = gen_boundary;
                     SYS_QUEUE_BASE:   rf_w_data = queue_base;
                     SYS_GC_STATUS:    rf_w_data = {63'b0, gc_engine_busy};
+                    SYS_SCAN_COUNT:     rf_w_data = {56'b0, scan_fifo_count};
+                    SYS_SCAN_HEAD_OBJ:  rf_w_data = scan_fifo_head_obj;
+                    SYS_SCAN_HEAD_FIELD: rf_w_data = {48'b0, scan_fifo_head_field};
+                    SYS_SCAN_POP_REF: begin
+                        rf_w_data     = scan_fifo_head_ref;
+                        scan_fifo_pop = (scan_fifo_count != 8'd0);
+                    end
                     SYS_PERF_CTR: begin
                         // Counter ID in imm16[4:0]
                         ctr_id    = dr.imm16[4:0];
@@ -1653,9 +1668,9 @@ module lm1_control
         // ---------------------------------------------------------
         S_BARRIER_MARK: begin
             lsu_req   = 1'b1;
-            lsu_op    = LSU_STORE64;  // full-word store (card table byte)
+            lsu_op    = LSU_STORE_BYTE;  // single-byte store to card table
             lsu_addr  = ta;
-            lsu_wdata = td;           // 0xFF..FF (marks card dirty)
+            lsu_wdata = td;              // low byte = 0xFF (marks card dirty)
             if (lsu_ready) ns = S_BARRIER_MARK_W;
         end
 

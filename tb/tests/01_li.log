@@ -1,5 +1,5 @@
--Info: /home/kir/Documents/scrap/list-machine/tb/lm1_tb.sv:170: $dumpvar ignored, as Verilated without --trace
-CPU halted after 17 cycles (PC=10)
+-Info: /home/kir/Documents/scrap/list-machine/tb/lm1_tb.sv:192: $dumpvar ignored, as Verilated without --trace
+CPU halted after 39 cycles (PC=10)
 REG r0 = 0000000000000000
 REG r1 = 000000000000002a
 REG r2 = ffffffffffffffff
@@ -32,4 +32,4 @@ REG r28 = 0000000000000000
 REG r29 = 0000000000000000
 REG r30 = 0000000000000000
 REG r31 = 0000000000000000
-- /home/kir/Documents/scrap/list-machine/tb/lm1_tb.sv:164: Verilog $finish
+- /home/kir/Documents/scrap/list-machine/tb/lm1_tb.sv:186: Verilog $finish

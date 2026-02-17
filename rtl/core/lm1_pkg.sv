@@ -305,6 +305,12 @@ package lm1_pkg;
     parameter logic [REG_IDX_W-1:0] SYS_GC_STATUS     = 5'd9;
     parameter logic [REG_IDX_W-1:0] SYS_PERF_CTR      = 5'd10;
 
+    // SYS_INFO sub-codes for scanner result FIFO
+    parameter logic [REG_IDX_W-1:0] SYS_SCAN_COUNT      = 5'd11;  // FIFO occupancy
+    parameter logic [REG_IDX_W-1:0] SYS_SCAN_HEAD_OBJ   = 5'd12;  // head entry: obj addr
+    parameter logic [REG_IDX_W-1:0] SYS_SCAN_HEAD_FIELD  = 5'd13;  // head entry: field index
+    parameter logic [REG_IDX_W-1:0] SYS_SCAN_POP_REF     = 5'd14;  // head entry: ref (+ pop)
+
     // ---------------------------------------------------------------
     // GC engine command codes  (for ENQ.* opcodes → engine command port)
     // ---------------------------------------------------------------

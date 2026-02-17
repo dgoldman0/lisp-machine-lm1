@@ -79,6 +79,24 @@ module lm1_gc_engine_top
     assign cmd_ready = !busy;  // Accept commands only when all engines idle
 
     // ---------------------------------------------------------------
+    // Latch copier source region for fixup bounds checking.
+    // The fixup engine should only follow refs that point into the
+    // region where the copier installed forwarding pointers.
+    // ---------------------------------------------------------------
+    logic [XLEN-1:0] fwd_region_base, fwd_region_end;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            fwd_region_base <= '0;
+            fwd_region_end  <= '0;
+        end else if (cmd_valid && cmd_ready &&
+                     (cmd_op == GC_CMD_COPY || cmd_op == GC_CMD_COMPACT)) begin
+            fwd_region_base <= cmd_arg0;
+            fwd_region_end  <= cmd_arg0 + cmd_arg2;
+        end
+    end
+
+    // ---------------------------------------------------------------
     // Command dispatch
     // ---------------------------------------------------------------
     always_comb begin
@@ -98,17 +116,58 @@ module lm1_gc_engine_top
     end
 
     // ---------------------------------------------------------------
-    // Memory port arbiter — round-robin priority
+    // Memory port arbiter — fixed priority
     //
     // Priority: scanner (read-only) > copier > fixup
     // In practice only one engine runs at a time, but the arbiter
     // handles overlapping requests gracefully.
+    //
+    // SRAM has 1-cycle read latency: the engine asserts mem_rd_en in
+    // its READ state, then transitions to WAIT (deasserting rd_en).
+    // We register which engine won the grant so that mem_rd_valid
+    // arriving one cycle later is routed to the correct engine.
     // ---------------------------------------------------------------
 
-    // Read arbiter
+    // Track which engine was granted a read (1-cycle pipeline)
+    typedef enum logic [1:0] {
+        RD_GRANT_NONE = 2'd0,
+        RD_GRANT_SC   = 2'd1,
+        RD_GRANT_CP   = 2'd2,
+        RD_GRANT_FX   = 2'd3
+    } rd_grant_t;
+
+    rd_grant_t rd_grant_r;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            rd_grant_r <= RD_GRANT_NONE;
+        else if (sc_mem_rd_en)
+            rd_grant_r <= RD_GRANT_SC;
+        else if (cp_mem_rd_en)
+            rd_grant_r <= RD_GRANT_CP;
+        else if (fx_mem_rd_en)
+            rd_grant_r <= RD_GRANT_FX;
+    end
+
+    // Read arbiter — address/enable mux (active during request cycle)
     always_comb begin
         mem_rd_en   = 1'b0;
         mem_rd_addr = '0;
+
+        if (sc_mem_rd_en) begin
+            mem_rd_en   = 1'b1;
+            mem_rd_addr = sc_mem_rd_addr;
+        end else if (cp_mem_rd_en) begin
+            mem_rd_en   = 1'b1;
+            mem_rd_addr = cp_mem_rd_addr;
+        end else if (fx_mem_rd_en) begin
+            mem_rd_en   = 1'b1;
+            mem_rd_addr = fx_mem_rd_addr;
+        end
+    end
+
+    // Route read-valid to the engine that was granted (1 cycle ago)
+    always_comb begin
         sc_mem_rd_valid = 1'b0;
         cp_mem_rd_valid = 1'b0;
         fx_mem_rd_valid = 1'b0;
@@ -116,19 +175,12 @@ module lm1_gc_engine_top
         cp_mem_rd_data  = mem_rd_data;
         fx_mem_rd_data  = mem_rd_data;
 
-        if (sc_mem_rd_en) begin
-            mem_rd_en   = 1'b1;
-            mem_rd_addr = sc_mem_rd_addr;
-            sc_mem_rd_valid = mem_rd_valid;
-        end else if (cp_mem_rd_en) begin
-            mem_rd_en   = 1'b1;
-            mem_rd_addr = cp_mem_rd_addr;
-            cp_mem_rd_valid = mem_rd_valid;
-        end else if (fx_mem_rd_en) begin
-            mem_rd_en   = 1'b1;
-            mem_rd_addr = fx_mem_rd_addr;
-            fx_mem_rd_valid = mem_rd_valid;
-        end
+        case (rd_grant_r)
+            RD_GRANT_SC: sc_mem_rd_valid = mem_rd_valid;
+            RD_GRANT_CP: cp_mem_rd_valid = mem_rd_valid;
+            RD_GRANT_FX: fx_mem_rd_valid = mem_rd_valid;
+            default: ;
+        endcase
     end
 
     // Write arbiter
@@ -202,6 +254,8 @@ module lm1_gc_engine_top
         .cmd_ready        (fx_cmd_ready),
         .cmd_region_base  (cmd_arg0),
         .cmd_region_size  (cmd_arg1),
+        .fwd_region_base  (fwd_region_base),
+        .fwd_region_end   (fwd_region_end),
         .mem_rd_en        (fx_mem_rd_en),
         .mem_rd_addr      (fx_mem_rd_addr),
         .mem_rd_data      (fx_mem_rd_data),

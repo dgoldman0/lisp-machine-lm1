@@ -20,6 +20,10 @@ class Op(IntEnum):
     ADD_FIX_IMM   = 0b000011  # 3
     CMP_TAGGED    = 0b000100  # 4   (func=0 CMP, func=1 EQ)
 
+    # Sub-word memory access
+    LDW           = 0b000101  # 5   32-bit load (zero-extended)
+    STW           = 0b000110  # 6   32-bit store
+
     # Family 2 — Allocation
     ALLOC         = 0b001000  # 8
     ALLOC_CONS    = 0b001001  # 9
@@ -62,6 +66,10 @@ class Op(IntEnum):
     ENQ_COMPACT   = 0b101011  # 43
 
     # Scalar — Supplementary
+    LDB           = 0b101100  # 44  byte load (zero-extended)
+    STB           = 0b101101  # 45  byte store
+    LDH           = 0b101110  # 46  halfword load (zero-extended)
+    STH           = 0b101111  # 47  halfword store
     ARITH_RAW     = 0b110000  # 48  (func: ADD=0,SUB=1,MUL=2,DIV=3,MOD=4)
     BITWISE       = 0b110001  # 49  (func: AND=0,OR=1,XOR=2,SHL=3,SHR=4,ASR=5,NOT=6)
     LDR           = 0b110010  # 50
@@ -127,6 +135,16 @@ FUNC_THREAD_ID = 1
 FUNC_CYCLE     = 2
 FUNC_TRAP_CAUSE = 3
 FUNC_TRAP_PC    = 4
+FUNC_CARD_BASE     = 5
+FUNC_CARD_SHIFT    = 6
+FUNC_GEN_BOUNDARY  = 7
+FUNC_QUEUE_BASE    = 8
+FUNC_GC_STATUS     = 9
+FUNC_PERF_CTR      = 10
+FUNC_SCAN_COUNT      = 11
+FUNC_SCAN_HEAD_OBJ   = 12
+FUNC_SCAN_HEAD_FIELD = 13
+FUNC_SCAN_POP_REF    = 14
 
 # HALT_NOP sub-functions
 FUNC_HALT = 0
