@@ -71,6 +71,9 @@ module lm1_alu
     // Iterative unsigned divider (1 bit per cycle, 64 cycles)
     logic [XLEN-1:0]     div_q, div_r;
     logic [XLEN-1:0]     div_d;  // divisor register
+    logic                div_is_fix;     // tagged fixnum divide in progress
+    logic                div_sign_q;     // quotient sign (a_neg ^ b_neg)
+    logic                div_sign_r;     // remainder sign (follows dividend)
 
     assign div_busy = (div_state != DIV_IDLE);
 
@@ -84,6 +87,9 @@ module lm1_alu
             div_d        <= '0;
             div_count    <= '0;
             div_by_zero  <= 1'b0;
+            div_is_fix   <= 1'b0;
+            div_sign_q   <= 1'b0;
+            div_sign_r   <= 1'b0;
         end else begin
             case (div_state)
                 DIV_IDLE: begin
@@ -100,26 +106,38 @@ module lm1_alu
                             div_dividend<= operand_a;
                             div_divisor <= operand_b;
                             div_count   <= 7'd63;
+                            div_is_fix  <= 1'b0;
                             div_state   <= DIV_RUNNING;
                         end
                     end else if (start && (alu_op == OP_ARITH_FIX) &&
                                  (alu_func == FUNC_DIV_FIX)) begin
-                        // Tagged fixnum divide: untag both operands,
-                        // divide, then retag result in the output mux.
-                        // Untag: arithmetic right shift by 1
-                        logic [XLEN-1:0] fix_div_a, fix_div_b;
-                        fix_div_a = $unsigned($signed(operand_a) >>> 1);
-                        fix_div_b = $unsigned($signed(operand_b) >>> 1);
-                        if (fix_div_b == '0) begin
+                        // Tagged fixnum divide: untag, take absolute values,
+                        // divide unsigned, then correct signs in result mux.
+                        // Avoid $signed/>>> for Verilator compatibility.
+                        logic [XLEN-1:0] fix_ua, fix_ub;
+                        logic [XLEN-1:0] abs_a, abs_b;
+                        logic a_neg, b_neg;
+                        // Manual arithmetic right shift by 1 (untag)
+                        fix_ua = {operand_a[XLEN-1], operand_a[XLEN-1:1]};
+                        fix_ub = {operand_b[XLEN-1], operand_b[XLEN-1:1]};
+                        a_neg = operand_a[XLEN-1];
+                        b_neg = operand_b[XLEN-1];
+                        // Absolute values via two's complement
+                        abs_a = a_neg ? (~fix_ua + 64'd1) : fix_ua;
+                        abs_b = b_neg ? (~fix_ub + 64'd1) : fix_ub;
+                        div_sign_q <= a_neg ^ b_neg;
+                        div_sign_r <= a_neg;
+                        div_is_fix <= 1'b1;
+                        if (abs_b == '0) begin
                             div_by_zero <= 1'b1;
                             div_state   <= DIV_DONE;
                         end else begin
                             div_by_zero  <= 1'b0;
                             div_q        <= '0;
                             div_r        <= '0;
-                            div_d        <= fix_div_b;
-                            div_dividend <= fix_div_a;
-                            div_divisor  <= fix_div_b;
+                            div_d        <= abs_b;
+                            div_dividend <= abs_a;
+                            div_divisor  <= abs_b;
                             div_count    <= 7'd63;
                             div_state    <= DIV_RUNNING;
                         end
@@ -228,7 +246,7 @@ module lm1_alu
                                 trap_code    = TRAP_DIVIDE_BY_ZERO;
                                 result_valid = 1'b1;
                             end else begin
-                                result       = div_quotient;
+                                result       = div_q;  // read working reg directly
                                 result_valid = 1'b1;
                             end
                         end
@@ -240,7 +258,7 @@ module lm1_alu
                                 trap_code    = TRAP_DIVIDE_BY_ZERO;
                                 result_valid = 1'b1;
                             end else begin
-                                result       = div_remainder;
+                                result       = div_r;  // read working reg directly
                                 result_valid = 1'b1;
                             end
                         end
@@ -300,15 +318,18 @@ module lm1_alu
                             result_valid = 1'b1;
                         end
                         FUNC_DIV_FIX: begin
-                            // Multi-cycle: divider operates on untagged values.
-                            // When done, retag quotient as fixnum (<<1).
+                            // Multi-cycle: divider operates on absolute values.
+                            // When done, correct sign and retag quotient.
                             if (div_state == DIV_DONE) begin
                                 if (div_by_zero) begin
                                     trap_raise   = 1'b1;
                                     trap_code    = TRAP_DIVIDE_BY_ZERO;
                                     result_valid = 1'b1;
                                 end else begin
-                                    result       = tag_fixnum(div_quotient);
+                                    // Sign correction: negate if exactly one operand was negative
+                                    logic [XLEN-1:0] corrected_q;
+                                    corrected_q = div_sign_q ? (~div_q + 64'd1) : div_q;
+                                    result       = tag_fixnum(corrected_q);
                                     result_valid = 1'b1;
                                 end
                             end

@@ -438,6 +438,18 @@ class Assembler:
         if mn == 'TST.SPECIAL':
             rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
             return encode_i(Op.TST, rd, rs1, 3)
+        if mn == 'TST.NIL':
+            rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
+            return encode_i(Op.TST, rd, rs1, 4)
+        if mn == 'TST.CHAR':
+            rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
+            return encode_i(Op.TST, rd, rs1, 5)
+        if mn == 'TST.SFLOAT':
+            rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
+            return encode_i(Op.TST, rd, rs1, 6)
+        if mn == 'TST.HDR':
+            rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
+            return encode_i(Op.TST, rd, rs1, 7)
         if mn == 'TST.SHAPE':
             rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
             shape = self._eval_expr(args[2], ln)
@@ -651,18 +663,18 @@ class Assembler:
         # Messaging: SEND, RECV, TRY.RECV
         # ---------------------------------------------------------------
         if mn == 'SEND':
-            rs_q = self._reg(args[0], ln)   # queue desc
-            rt_v = self._reg(args[1], ln)   # value
-            return encode_s(Op.SEND, rs_q, rt_v, 0)
+            rd = self._reg(args[0], ln)      # value register (data to send)
+            qid = self._eval_expr(args[1], ln)  # queue ID (immediate 0-3)
+            return encode_i(Op.SEND, rd, 0, qid)
         if mn == 'RECV':
-            rd = self._reg(args[0], ln)
-            rs1 = self._reg(args[1], ln)
-            return encode_i(Op.RECV, rd, rs1, 0)
+            rd = self._reg(args[0], ln)      # destination register
+            qid = self._eval_expr(args[1], ln)  # queue ID (immediate 0-3)
+            return encode_i(Op.RECV, rd, 0, qid)
         if mn == 'TRY.RECV':
-            rd = self._reg(args[0], ln)     # value dest
-            rd2 = self._reg(args[1], ln)    # status dest
-            rs1 = self._reg(args[2], ln)    # queue
-            return encode_r(Op.RECV, rd, rs1, 0, rd2)
+            rd = self._reg(args[0], ln)       # value dest
+            rd2 = self._reg(args[1], ln)      # status dest (must not be r0)
+            qid = self._eval_expr(args[2], ln)  # queue ID (immediate 0-3)
+            return encode_r(Op.RECV, rd, 0, 0, rd2) | (qid & 0x3)
 
         # ---------------------------------------------------------------
         # Atomics: CAS.TAGGED, FAA, FENCE.GC

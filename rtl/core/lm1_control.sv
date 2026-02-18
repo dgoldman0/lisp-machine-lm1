@@ -203,6 +203,8 @@ module lm1_control
         S_TRY_RECV_WB,
         S_ENQ_WAIT,
         S_FENCE_GC,
+        S_ATOMIC_STORE,
+        S_ATOMIC_STORE_W,
         S_TRAP_LOOKUP,
         S_TRAP_WAIT,
         S_HALTED
@@ -1373,6 +1375,8 @@ module lm1_control
                         rf_w_addr = banked_addr(cur_thread, dr.rd);
                         rf_w_data = mq_rd_data;
                         opa_n     = VAL_T;     // remember: success
+                        cyc_inc   = 1'b0;      // defer PC advance to WB
+                        pc_n      = pc;
                         ns = S_TRY_RECV_WB;
                     end else begin
                         // Empty — Rd = nil
@@ -1380,6 +1384,8 @@ module lm1_control
                         rf_w_addr = banked_addr(cur_thread, dr.rd);
                         rf_w_data = VAL_NIL;
                         opa_n     = VAL_NIL;   // remember: empty
+                        cyc_inc   = 1'b0;      // defer PC advance to WB
+                        pc_n      = pc;
                         ns = S_TRY_RECV_WB;
                     end
                 end else begin
@@ -1557,31 +1563,34 @@ module lm1_control
                     rf_we     = 1'b1;
                     rf_w_addr = banked_addr(cur_thread, dr.rd);
                     rf_w_data = lsu_rdata;
-                    // Issue store of new value
-                    lsu_req   = 1'b1;
-                    lsu_op    = LSU_STORE64;
-                    lsu_addr  = ta;
-                    lsu_wdata = lsu_rdata + opc;
-                    ns        = S_FETCH;
+                    // Save computed new value for write-back via S_ATOMIC_STORE
+                    // (cannot issue store here — LSU is still in WAIT_RD,
+                    //  lsu_ready is 0, so the store would be silently dropped)
+                    td_n    = lsu_rdata + opc;
+                    cyc_inc = 1'b0;
+                    pc_n    = pc;
+                    ns      = S_ATOMIC_STORE;
                 end
 
                 OP_CAS_TAGGED: begin
                     if (lsu_rdata == opc) begin
-                        // Match → store new value from func register
+                        // Match → save new value for write-back via S_ATOMIC_STORE
+                        // (cannot issue store here — LSU is still in WAIT_RD,
+                        //  lsu_ready is 0, so the store would be silently dropped)
                         rf_rd1_addr = banked_addr(cur_thread, dr.func);
-                        lsu_req     = 1'b1;
-                        lsu_op      = LSU_STORE64;
-                        lsu_addr    = ta;
-                        lsu_wdata   = rf_rd1_data;
+                        td_n        = rf_rd1_data;
                         rf_we       = 1'b1;
                         rf_w_addr   = banked_addr(cur_thread, dr.rd);
                         rf_w_data   = VAL_T;
+                        cyc_inc     = 1'b0;
+                        pc_n        = pc;
+                        ns          = S_ATOMIC_STORE;
                     end else begin
                         rf_we       = 1'b1;
                         rf_w_addr   = banked_addr(cur_thread, dr.rd);
                         rf_w_data   = VAL_NIL;
+                        ns          = S_FETCH;
                     end
-                    ns = S_FETCH;
                 end
 
                 default: ns = S_FETCH;
@@ -2218,6 +2227,31 @@ module lm1_control
         // ---------------------------------------------------------
         S_FENCE_GC: begin
             if (!gc_engine_busy) begin
+                cyc_inc = 1'b1;
+                pc_n    = pc + 64'd4;
+                ns      = S_FETCH;
+            end
+        end
+
+        // ---------------------------------------------------------
+        // ATOMIC_STORE: issue the store part of FAA / CAS.TAGGED
+        //
+        // The load response was consumed in S_MEM_WAIT.  The LSU was
+        // still in WAIT_RD that cycle (lsu_ready == 0), so we could
+        // NOT issue the store there.  By the time we reach this state
+        // the LSU has returned to IDLE (lsu_ready == 1) and we can
+        // safely issue the store.
+        // ---------------------------------------------------------
+        S_ATOMIC_STORE: begin
+            lsu_req   = 1'b1;
+            lsu_op    = LSU_STORE64;
+            lsu_addr  = ta;
+            lsu_wdata = td;
+            if (lsu_ready) ns = S_ATOMIC_STORE_W;
+        end
+
+        S_ATOMIC_STORE_W: begin
+            if (lsu_valid) begin
                 cyc_inc = 1'b1;
                 pc_n    = pc + 64'd4;
                 ns      = S_FETCH;
