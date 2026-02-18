@@ -1,0 +1,7 @@
+# Yosys / sv2v build artifacts
+lm1_all.v
+lm1.json
+lm1.edif
+lm1_synth.log
+lm1_timing.log
+lm1_utilization.rpt

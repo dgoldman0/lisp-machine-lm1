@@ -1,0 +1,34 @@
+# ============================================================================
+# LM-1 Yosys Synthesis Script — Xilinx 7-Series
+#
+# Reads the sv2v-converted Verilog output, synthesizes for Xilinx 7-series.
+# Run via the Makefile: make synth
+#
+# This script expects lm1_all.v to already exist (produced by sv2v).
+#
+# NOTE: Do NOT use -flatten — the 64-bit datapaths cause TECHMAP to
+# stall for 30+ minutes and exhaust memory when flattened.  Keeping
+# hierarchy lets Yosys process each module individually.
+# ============================================================================
+
+# --- Read the sv2v-converted design ---
+tee -a lm1_timing.log log *** [%D %T] READ_VERILOG start
+read_verilog lm1_all.v
+tee -a lm1_timing.log log *** [%D %T] READ_VERILOG done
+
+# --- Synthesize for Xilinx 7-series ---
+tee -a lm1_timing.log log *** [%D %T] SYNTH_XILINX start
+synth_xilinx -top lm1_fpga_top
+tee -a lm1_timing.log log *** [%D %T] SYNTH_XILINX done
+
+# --- Reports ---
+tee -a lm1_timing.log log *** [%D %T] STAT start
+stat -tech xilinx
+tee -o lm1_utilization.rpt stat -tech xilinx
+tee -a lm1_timing.log log *** [%D %T] STAT done
+
+# --- Write outputs ---
+tee -a lm1_timing.log log *** [%D %T] WRITE start
+write_json  lm1.json
+write_edif  lm1.edif
+tee -a lm1_timing.log log *** [%D %T] WRITE done (all complete)

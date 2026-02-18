@@ -5,9 +5,8 @@
 # Paths are relative to the repository root.
 #
 # Usage:
-#   - Vivado:  read_verilog -sv [glob {*}] with this list
-#   - Quartus: set_global_assignment -name SYSTEMVERILOG_FILE ...
-#   - Yosys:   read_verilog -sv -f filelist.f
+#   - Yosys:   see rtl/target/xilinx7/synth.ys
+#   - Generic: read_verilog -sv -f filelist.f
 # ============================================================================
 
 # --- Package (must come first) ---

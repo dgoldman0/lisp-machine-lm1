@@ -6,9 +6,9 @@
 // rtl/ is untouched.
 //
 // Features:
-//   - PLL/MMCM wrapper to generate the core clock from the board
-//     oscillator (instantiated via Xilinx primitives or a clock wizard
-//     IP — see the Vivado project script).
+//   - PLL/MMCM wrapper placeholder to generate the core clock from
+//     the board oscillator (replace with target-specific primitive
+//     when the clock frequency is known).
 //   - Directly exposes the external memory port so an external
 //     controller (UART loader, JTAG, etc.) can write the program
 //     image before de-asserting reset.
@@ -16,9 +16,8 @@
 //     a shift-register debouncer.
 //   - LED outputs for basic status.
 //
-// Target:  Xilinx 7-series (Artix-7 / Arty A7-100T or similar).
-//          Easily re-targeted to other boards by adjusting the .xdc
-//          constraints and clock configuration.
+// Target:  Generic FPGA.  See rtl/target/<family>/ for synthesis
+//          scripts and pin constraints.
 //
 // Parameters:
 //   TILE_MEM_LOG2 — tile SRAM depth.  Max practical value depends on
