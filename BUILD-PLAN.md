@@ -133,9 +133,9 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [x] Screenshot export via PIL (`to_pil_image()`)
 - [x] Test: fill, draw rects, render text, animate cursor
 
-### Phase 10: Crystal Desktop — Window Manager ✅
+### Phase 10: Crystal Desktop — Window Manager ✅ (Legacy)
 **Goal:** Overlapping windows with move/resize/raise/lower, global menu bar, event dispatch.
-**Status:** Complete. 24 tests. Committed (b9e57c3). Visual bug fix committed (9a414f2).
+**Status:** Complete. 24 tests. Committed (b9e57c3). Superseded by Crystal v3 (see below) but code preserved in `desktop.py` for backward compatibility.
 
 - [x] AES: window create/close/raise/lower, z-order list
 - [x] Window dataclass with flags (closeable, moveable, resizable)
@@ -228,6 +228,63 @@ Build bottom-up. Each phase produces something testable. No phase depends on som
 - [x] FileManagerCrystallite: icon/list views, toolbar, VFS navigation
 - [x] Terminal: `ls`, `cat`, `pwd`, `cd` commands on VFS
 - [x] ControlPanel: VFS statistics display
+
+### Crystal v3 — Expression-Tree Desktop ✅
+**Goal:** Replace the AES window manager (Phases 10-12) with a fundamentally Lisp-native desktop. The screen becomes a single nested expression tree — every pixel traces back to a node you can inspect, edit, and connect. No window chrome, no floating windows. Portals, panes, lenses, facets.
+**Status:** Complete. 88 tests. `crystal.py` is the primary desktop; `desktop.py` preserved for backward compatibility.
+
+**Expression Tree Compositor (`crystal.py`)**
+- [x] `Crystal`: root of the expression tree — the entire desktop as one evaluable structure
+- [x] `Portal`: a live lens onto any Lisp object (target + lens + label + state)
+- [x] `Pane`: recursive spatial partitioning — vertical/horizontal splits, tab groups, floats
+- [x] Focus model: `_cycle_focus()` walks the tree, single focused portal receives keys
+- [x] Layout engine: recursive rect computation from tree structure
+- [x] Compositor: walk tree → render portals through lenses → draw dividers → draw bar
+
+**Built-in Lenses (8)**
+- [x] `InspectLens`: generic slot-by-slot object viewer (dict, list, int, str, dataclass)
+- [x] `PrettyLens`: s-expression pretty-printer with syntax coloring, scroll
+- [x] `TerminalLens`: interactive REPL — Lisp eval, VFS commands (ls/cd/cat/pwd), help
+- [x] `EditorLens`: full text editor — syntax highlighting, line numbers, undo/redo, cursor, save
+- [x] `TreeLens`: expand/collapse tree for VFS directories and nested data
+- [x] `StreamLens`: append-only log view, auto-scroll
+- [x] `TimeLens`: clock display (time + date)
+- [x] `InteractiveLens`: calculator with button grid and display
+
+**Crystal Bar**
+- [x] Bottom dock bar with launcher items (Terminal, Files, Editor, Calc, Inspector)
+- [x] Active portal indicators with focus highlight
+- [x] Clock display (right-aligned)
+- [x] Bar item hover state, click → action callback
+
+**Scrapbook**
+- [x] Typed clipboard with history (max 50)
+- [x] `snip()` / `paste()` with scrap_type filtering
+- [x] Source tracking and timestamps
+
+**Tree Manipulation**
+- [x] `set_root_portal()`: single portal as root
+- [x] `split_portal()`: split any portal into two (vertical or horizontal)
+- [x] `add_tab()`: convert portal to tabbed pane
+- [x] `close_portal()`: remove portal, collapse tree if single child remains
+- [x] Ctrl-Tab: cycle focus, Ctrl-W: close, Ctrl-\\: split-v, Ctrl-/: split-h
+
+**Visual Design**
+- [x] Deep charcoal canvas (0x0D0D14) — near-black indigo
+- [x] Semantic type coloring: functions=cyan, data=amber, actors=green, errors=red
+- [x] Focus glow (teal 0x00B4D8) — 2px ring around focused portal
+- [x] Subtle 1px portal edges, thin pane dividers
+- [x] No window chrome — content fills space, labels are tiny
+
+**Lens Registry**
+- [x] `register_lens()` / `get_lens()` — extensible lens system
+- [x] Fallback to InspectLens for unknown lens names
+
+**Default Layout**
+- [x] Vertical split 0.25: Files tree | Horizontal split 0.65 (Terminal | System Inspector)
+- [x] Focus starts on Terminal, bar has 5 launcher items
+- [x] `launch_crystal()` replaces `launch_desktop()` (alias preserved)
+
 
 ### Phase 14: Compiler Extensions — Full Cross-Compiler
 **Goal:** Cross-compiler powerful enough to write the desktop natively on the LM-1. Currently the compiler handles only first-order Lisp with direct calls (no closures, no strings, no vectors, no iteration). This phase fills every gap.
@@ -475,7 +532,8 @@ Why custom: A Lisp machine should have a Lisp-native filesystem. Crystal FS is:
 | 11    | 31    |
 | 12    | —     |
 | 13    | 49    |
-| **Total** | **258** (all passing) |
+| Crystal v3 | 88 |
+| **Total** | **346** (all passing) |
 
 ---
 
@@ -484,13 +542,13 @@ Why custom: A Lisp machine should have a Lisp-native filesystem. Crystal FS is:
 - **Python 3.12.3** with venv
 - **LM-1 ISA:** 64-bit tagged words, 32-bit fixed-width instructions, 6-bit opcode, 44 opcodes, 5 encoding formats
 - **C Acceleration:** `_accel_ext.c` exists but covers only Phase 1 scalar ops and is **not wired into** the executor. Tagged operations (the entire Lisp hot path) run in pure Python. Phase 15 addresses this.
-- **Two Parallel Worlds:** The machine emulator (phases 1-8: execute.py, core.py, memory.py, compiler.py) and the desktop framework (phases 9-13: desktop.py, vdi.py, vfs.py, toolkit.py, icons.py) are **completely disconnected**. The desktop runs as native Python objects, not as compiled Lisp on the emulator. Phase 14 (compiler extensions) and Phase 16 (native OS) bridge this gap.
+- **Two Parallel Worlds:** The machine emulator (phases 1-8: execute.py, core.py, memory.py, compiler.py) and the desktop framework (phases 9-13+Crystal: crystal.py, vdi.py, vfs.py, toolkit.py, icons.py) are **completely disconnected**. The desktop runs as native Python objects, not as compiled Lisp on the emulator. Phase 14 (compiler extensions) and Phase 16 (native OS) bridge this gap.
 - **VDI:** 1024×768 default, 32-bit RGBA truecolor, pygame display (headless for tests). TRAP 0x83 interface defined but unused — desktop calls VDI methods directly.
 - **Cross-compiler:** Lisp → LM-1 assembly → binary. Currently first-order only (no closures, no strings, no vectors, no iteration beyond recursion). Phase 14 fills these gaps.
 - **VFS:** `vfs.py` — in-memory virtual filesystem. Crystal FS (Phase 17) will provide block-device persistence.
-- **Widget Toolkit:** `toolkit.py` — full widget set rendering through VDI, WidgetHost bridges to AES windows
+- **Widget Toolkit:** `toolkit.py` — full widget set rendering through VDI, available for use inside lenses
 - **Icons:** `icons.py` — 21 pixel-art 16×16 stock icons for files/folders/apps, 1x/2x rendering
-- **Desktop:** Host-side Python (AES + VDI + Toolkit). Native port planned for Phase 16.
+- **Desktop:** Crystal v3 expression-tree compositor (`crystal.py`). Old AES window manager preserved in `desktop.py` for backward compat. Entry point: `python -m lm1 desktop` launches Crystal.
 
 ## The Simulator → Emulator Gap
 

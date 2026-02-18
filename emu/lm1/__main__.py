@@ -20,8 +20,8 @@ def main() -> int:
         parser.add_argument("--scale", type=int, default=2)
         args = parser.parse_args(sys.argv[2:])
 
-        from .desktop import launch_desktop
-        launch_desktop(width=args.width, height=args.height, scale=args.scale)
+        from .crystal import launch_crystal
+        launch_crystal(width=args.width, height=args.height, scale=args.scale)
         return 0
     else:
         from .cli import main as cli_main
