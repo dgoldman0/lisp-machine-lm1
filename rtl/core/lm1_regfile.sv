@@ -46,7 +46,7 @@ module lm1_regfile
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (int i = 0; i < TOTAL_REGS; i++)
-                regs[i] = '0;  // blocking OK in reset (Verilator compat)
+                regs[i] = '0;  // blocking in reset loop (Verilator requirement)
         end else if (w_en) begin
             regs[w_addr] <= w_data;
         end

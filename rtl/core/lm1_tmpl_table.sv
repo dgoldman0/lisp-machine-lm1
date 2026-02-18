@@ -29,7 +29,6 @@ module lm1_tmpl_table
     // Combinational read
     assign rd_data = entries[rd_idx];
 
-    // Synchronous write (no array-loop reset — use initial block for sim)
     // synthesis translate_off
     initial begin
         for (int i = 0; i < 256; i++)
@@ -37,8 +36,12 @@ module lm1_tmpl_table
     end
     // synthesis translate_on
 
-    always_ff @(posedge clk) begin
-        if (wr_en) begin
+    // Synchronous write with reset
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (int i = 0; i < 256; i++)
+                entries[i] = '0;  // blocking in reset loop (Verilator req)
+        end else if (wr_en) begin
             entries[wr_idx] <= wr_data;
         end
     end

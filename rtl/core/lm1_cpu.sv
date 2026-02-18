@@ -193,7 +193,7 @@ module lm1_cpu
     // hit or LSU fallback).
     // ---------------------------------------------------------------
     logic [ILEN-1:0] inst_latched;
-    always_ff @(posedge clk) begin
+    always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             inst_latched <= '0;
         else if (inst_latch_en)
@@ -237,15 +237,19 @@ module lm1_cpu
         .rst_n   (rst_n),
         .ra_addr (rf_rd1_addr),
         .ra_data (rf_rd1_data),
-        .rb_addr (rf_rd2_addr),
+        .rb_addr (rf_rd2_addr_dbg),
         .rb_data (rf_rd2_data),
         .w_en    (rf_we),
         .w_addr  (rf_w_addr),
         .w_data  (rf_w_data)
     );
 
-    // Debug register read: directly from the register array via port B
-    // when halted.  Uses a registered output to avoid comb loops.
+    // Debug register read: override port-B address when halted so the
+    // testbench-supplied dbg_reg_addr actually selects the register.
+    // Thread 0 is used for the banked address (debug always reads thread 0).
+    logic [FULL_REG_W-1:0] rf_rd2_addr_dbg;
+    assign rf_rd2_addr_dbg = halted ? {2'b00, dbg_reg_addr} : rf_rd2_addr;
+
     logic [XLEN-1:0] dbg_reg_latched;
     always_ff @(posedge clk) begin
         if (halted)
@@ -356,6 +360,10 @@ module lm1_cpu
     // I-Cache fill sequencer
     // Reads 8 sequential 64-bit words from SRAM to fill a cache line.
     // Active only when the I-Cache asserts fill_req (cache miss).
+    // TODO(multi-tile): Currently fills only from local SRAM.  To execute
+    //   code located in another tile's memory, this sequencer must route
+    //   fill reads through the crossbar when the fill address exceeds the
+    //   local SRAM range.
     typedef enum logic [1:0] {
         ICFILL_IDLE,
         ICFILL_READ,
@@ -584,7 +592,20 @@ module lm1_cpu
     logic               lsu_is_cluster_addr;
     assign lsu_is_cluster_addr = |mem_addr_lsu[XLEN-1:MEM_DEPTH_LOG2];
 
+    // Registered copy: capture the cluster-addr flag at request issue time
+    // so the response mux is still correct even after mem_addr_lsu reverts.
+    logic               lsu_is_cluster_addr_r;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            lsu_is_cluster_addr_r <= 1'b0;
+        else if (mem_en && !ext_mem_en)
+            lsu_is_cluster_addr_r <= lsu_is_cluster_addr;
+    end
+
     // Crossbar request: issue when LSU drives a cluster address
+    // TODO(multi-tile): Gate xbar_req_valid on xbar_req_ready inside the
+    //   LSU or add a holding register here.  Without back-pressure the
+    //   crossbar may silently drop writes when busy.
     assign xbar_req_valid = mem_en && !ext_mem_en && lsu_is_cluster_addr;
     assign xbar_req_we    = mem_we;
     assign xbar_req_addr  = mem_addr_lsu;  // full word address to crossbar
@@ -622,8 +643,9 @@ module lm1_cpu
     end
 
     // Read data mux: use crossbar response for cluster addresses,
-    // local SRAM for tile-local addresses
-    assign mem_rdata     = lsu_is_cluster_addr ? xbar_resp_data : sram_rdata;
+    // local SRAM for tile-local addresses.  Uses the registered flag
+    // so the mux is stable when the response arrives (after LSU idle).
+    assign mem_rdata     = lsu_is_cluster_addr_r ? xbar_resp_data : sram_rdata;
     assign ext_mem_rdata = sram_rdata;
 
     lm1_sram_sp #(

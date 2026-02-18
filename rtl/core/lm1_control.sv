@@ -198,8 +198,8 @@ module lm1_control
         S_BARRIER_CHECK,
         S_BARRIER_MARK,
         S_BARRIER_MARK_W,
-        S_SEND_WAIT,
-        S_RECV_WAIT,
+        S_SEND_WAIT,        // reserved — not yet used (blocking SEND)
+        S_RECV_WAIT,        // reserved — not yet used (blocking RECV)
         S_TRY_RECV_WB,
         S_ENQ_WAIT,
         S_FENCE_GC,
@@ -555,7 +555,6 @@ module lm1_control
                 // I-Cache hit (or fill just completed)
                 inst_latch_en   = 1'b1;
                 inst_latch_data = icache_fetch_inst;
-                ctr_ic_hit_inc  = 1'b1;
                 ns = S_DECODE;
             end
             // On miss the I-Cache fill sequencer (in lm1_cpu) handles the

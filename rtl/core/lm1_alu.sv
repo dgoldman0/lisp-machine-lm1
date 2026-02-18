@@ -62,7 +62,6 @@ module lm1_alu
     } div_state_t;
 
     div_state_t          div_state, div_state_next;
-    logic [XLEN-1:0]     div_quotient, div_remainder;
     logic [XLEN-1:0]     div_dividend, div_divisor;
     logic [6:0]          div_count;
     logic                div_busy;
@@ -80,8 +79,6 @@ module lm1_alu
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             div_state    <= DIV_IDLE;
-            div_quotient <= '0;
-            div_remainder<= '0;
             div_q        <= '0;
             div_r        <= '0;
             div_d        <= '0;
@@ -164,8 +161,6 @@ module lm1_alu
                 end
 
                 DIV_DONE: begin
-                    div_quotient  <= div_q;
-                    div_remainder <= div_r;
                     div_state     <= DIV_IDLE;
                 end
 

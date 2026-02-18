@@ -139,7 +139,7 @@ module lm1_icache
             fill_index    <= '0;
             fill_tag      <= '0;
             for (int i = 0; i < NUM_SETS; i++) begin
-                valid_store[i] = 1'b0;   // blocking OK in reset (Verilator compat)
+                valid_store[i] = 1'b0;   // blocking in reset loop (Verilator req)
                 tag_store[i]   = '0;
             end
         end else begin
