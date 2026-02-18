@@ -1,12 +1,16 @@
 // ============================================================================
-// LM-1 Header Template Table — FPGA (Xilinx 7-Series) Target Override
+// LM-1 Header Template Table — FPGA (Xilinx 7-Series) Target Override v2
 //
-// Functionally identical to the pure RTL version in rtl/core/lm1_tmpl_table.sv.
-// The ONLY change is the (* ram_style = "distributed" *) attribute on the
-// entries array, directing Yosys to infer Xilinx LUTRAM (RAM256X1S) instead
-// of expanding a 256:1 async read mux into $shiftx cells.
+// Same port interface as the pure RTL version (rtl/core/lm1_tmpl_table.sv).
 //
-// LUTRAM cost: 256 × 64 bits = 16 384 bits → ~1024 LUTs (RAM256X1S, 1R+1W).
+// Optimisation vs v1:
+//   - Async reset removed from the entries[] array.  The v1 version had
+//     `if (!rst_n) for (i) entries[i] = '0;` which forces Yosys to use
+//     individual FFs (16 384 FDCE + 5 440 LUT6 = 5 601 LCs) because
+//     LUTRAM primitives have no async reset.  Without the reset, Yosys
+//     can attempt to infer RAM256X1S distributed RAM.
+//   - For simulation, an `initial` block zeroes the array.
+//   - (* ram_style = "distributed" *) retained as a hint to Yosys.
 // ============================================================================
 module lm1_tmpl_table
     import lm1_pkg::*;
@@ -24,13 +28,12 @@ module lm1_tmpl_table
     input  logic [XLEN-1:0]   wr_data
 );
 
-    // Force Xilinx distributed RAM (LUTRAM) — supports async reads natively.
+    // Force Xilinx distributed RAM (LUTRAM).
+    // No async reset — LUTRAM is bitstream-initialised.
     (* ram_style = "distributed" *)
     logic [XLEN-1:0] entries [0:255];
 
-    // Combinational read (same as pure RTL)
-    assign rd_data = entries[rd_idx];
-
+    // Simulation-only initialisation
     // synthesis translate_off
     initial begin
         for (int i = 0; i < 256; i++)
@@ -38,14 +41,13 @@ module lm1_tmpl_table
     end
     // synthesis translate_on
 
-    // Synchronous write with reset
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (int i = 0; i < 256; i++)
-                entries[i] = '0;
-        end else if (wr_en) begin
+    // Combinational read (same as pure RTL)
+    assign rd_data = entries[rd_idx];
+
+    // Synchronous write — no reset, clean pattern for RAM inference
+    always_ff @(posedge clk) begin
+        if (wr_en)
             entries[wr_idx] <= wr_data;
-        end
     end
 
 endmodule

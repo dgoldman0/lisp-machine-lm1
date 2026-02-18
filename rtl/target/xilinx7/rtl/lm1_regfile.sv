@@ -1,13 +1,17 @@
 // ============================================================================
-// LM-1 Register File — FPGA (Xilinx 7-Series) Target Override
+// LM-1 Register File — FPGA (Xilinx 7-Series) Target Override v2
 //
-// Functionally identical to the pure RTL version in rtl/core/lm1_regfile.sv.
-// The ONLY change is the (* ram_style = "distributed" *) attribute on the
-// register array, which directs Yosys / Vivado to infer LUTRAM (RAM128X1D)
-// instead of expanding async reads into massive $shiftx mux trees that
-// stall TECHMAP for 30+ minutes.
+// Same port interface as the pure RTL version (rtl/core/lm1_regfile.sv).
 //
-// LUTRAM cost: 128 × 64 bits = 8 192 bits → ~256 LUTs (RAM128X1D, 2R+1W).
+// Optimisation vs v1:
+//   - Async reset removed from the regs[] array.  The v1 version had
+//     `if (!rst_n) for (i) regs[i] = '0;` which forces Yosys to use
+//     individual FFs (8 192 FDCE + 5 376 LUT6 = 5 530 LCs) because
+//     LUTRAM primitives have no async reset.  Without the reset, Yosys
+//     can attempt to infer RAM128X1D distributed RAM.
+//   - For simulation, an `initial` block zeroes the array (synthesis-
+//     ignored).  On FPGA, LUTRAM/BRAM is bitstream-initialised to 0.
+//   - (* ram_style = "distributed" *) retained as a hint to Yosys.
 // ============================================================================
 module lm1_regfile
     import lm1_pkg::*;
@@ -31,22 +35,28 @@ module lm1_regfile
 
     localparam int TOTAL_REGS = NUM_THREADS * NREGS;
 
-    // Force Xilinx distributed RAM (LUTRAM) — supports async reads natively.
+    // Force Xilinx distributed RAM (LUTRAM).
+    // No async reset — LUTRAM is bitstream-initialised; runtime reset
+    // would force Yosys to fall back to individual flip-flops.
     (* ram_style = "distributed" *)
     logic [XLEN-1:0] regs [0:TOTAL_REGS-1];
+
+    // Simulation-only initialisation (ignored by synthesis)
+    // synthesis translate_off
+    initial begin
+        for (int i = 0; i < TOTAL_REGS; i++)
+            regs[i] = '0;
+    end
+    // synthesis translate_on
 
     // Asynchronous reads (same as pure RTL)
     assign ra_data = regs[ra_addr];
     assign rb_data = regs[rb_addr];
 
-    // Synchronous write
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (int i = 0; i < TOTAL_REGS; i++)
-                regs[i] = '0;
-        end else if (w_en) begin
+    // Synchronous write — no reset, clean pattern for RAM inference
+    always_ff @(posedge clk) begin
+        if (w_en)
             regs[w_addr] <= w_data;
-        end
     end
 
 endmodule
