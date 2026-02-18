@@ -17,11 +17,12 @@ TOP     := lm1_fpga_top
 ROOT    := ../../..
 
 # All SV sources in dependency order.
-# Four modules are swapped for FPGA-specific versions (in rtl/ subdir)
+# Five modules are swapped for FPGA-specific versions (in rtl/ subdir)
 # that carry ram_style attributes or structural changes for Yosys/BRAM:
 #   lm1_regfile      → distributed LUTRAM (async 2R+1W)
 #   lm1_tmpl_table   → distributed LUTRAM (async 1R+1W)
 #   lm1_icache       → block RAM data_store (sync read, +IC_HIT state)
+#   lm1_ic_table     → N 64→16, no async reset (FDRE, smaller CAM)
 #   lm1_msg_queue    → DEPTH 512→32, distributed LUTRAM
 TARGET_RTL := rtl
 
@@ -37,7 +38,7 @@ SV_SRCS := \
 	$(ROOT)/rtl/core/lm1_lsu.sv \
 	$(TARGET_RTL)/lm1_icache.sv \
 	$(TARGET_RTL)/lm1_tmpl_table.sv \
-	$(ROOT)/rtl/core/lm1_ic_table.sv \
+	$(TARGET_RTL)/lm1_ic_table.sv \
 	$(TARGET_RTL)/lm1_msg_queue.sv \
 	$(ROOT)/rtl/core/lm1_perf_counters.sv \
 	$(ROOT)/rtl/core/lm1_control.sv \

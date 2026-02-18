@@ -61,6 +61,14 @@ module lm1_icache
     (* ram_style = "distributed" *)
     logic                 valid_store [0:NUM_SETS-1];
 
+    // Simulation initialisation (maps to FPGA bitstream init)
+    initial begin
+        for (int i = 0; i < NUM_SETS; i++) begin
+            tag_store[i]   = '0;
+            valid_store[i] = 1'b0;
+        end
+    end
+
     // ----------------------------------------------------------------
     // Data storage — Block RAM (sync read, 1024 × 64-bit = 8 KiB)
     // Flattened from [128][8] to [1024].
@@ -191,7 +199,43 @@ module lm1_icache
     assign bram_wr_data = fill_data;
 
     // ----------------------------------------------------------------
-    // Sequential FSM
+    // Tag store — isolated write path for clean LUTRAM inference.
+    // Single write port: fill_index / fill_tag, enabled at end of fill.
+    // ----------------------------------------------------------------
+    logic tag_wr_en;
+    assign tag_wr_en = (ic_state == IC_FILL) && fill_valid &&
+                       (fill_done || fill_word_idx == 3'd7);
+
+    always_ff @(posedge clk) begin
+        if (tag_wr_en)
+            tag_store[fill_index] <= fill_tag;
+    end
+
+    // ----------------------------------------------------------------
+    // Valid store — isolated write path for clean LUTRAM inference.
+    // Two write cases merged into single port via mux:
+    //   (a) Invalidate on miss:   addr=req_index,  data=0
+    //   (b) Validate after fill:  addr=fill_index, data=1
+    // These are mutually exclusive (different FSM states).
+    // ----------------------------------------------------------------
+    logic        valid_wr_en;
+    logic [INDEX_BITS-1:0] valid_wr_addr;
+    logic        valid_wr_data;
+
+    logic valid_miss_inval;
+    assign valid_miss_inval = (ic_state == IC_IDLE) && fetch_req && !cache_hit;
+
+    assign valid_wr_en   = valid_miss_inval || tag_wr_en;
+    assign valid_wr_addr = valid_miss_inval ? req_index : fill_index;
+    assign valid_wr_data = ~valid_miss_inval;  // 0 on miss, 1 on fill done
+
+    always_ff @(posedge clk) begin
+        if (valid_wr_en)
+            valid_store[valid_wr_addr] <= valid_wr_data;
+    end
+
+    // ----------------------------------------------------------------
+    // Sequential FSM — tag/valid writes removed (handled above)
     // ----------------------------------------------------------------
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -200,10 +244,6 @@ module lm1_icache
             fill_index    <= '0;
             fill_tag      <= '0;
             half_r        <= 1'b0;
-            for (int i = 0; i < NUM_SETS; i++) begin
-                valid_store[i] = 1'b0;
-                tag_store[i]   = '0;
-            end
         end else begin
             case (ic_state)
                 IC_IDLE: begin
@@ -218,7 +258,6 @@ module lm1_icache
                             fill_index    <= req_index;
                             fill_tag      <= req_tag;
                             fill_word_idx <= 3'd0;
-                            valid_store[req_index] <= 1'b0;
                             ic_state      <= IC_FILL;
                         end
                     end
@@ -233,8 +272,6 @@ module lm1_icache
                     if (fill_valid) begin
                         // bram_wr_en is asserted combinationally above
                         if (fill_done || fill_word_idx == 3'd7) begin
-                            tag_store[fill_index]   <= fill_tag;
-                            valid_store[fill_index] <= 1'b1;
                             ic_state <= IC_SETTLE;
                         end else begin
                             fill_word_idx <= fill_word_idx + 3'd1;

@@ -8,10 +8,10 @@ Open-source synthesis flow using **Yosys** (`synth_xilinx`) + **sv2v**.
 
 | Resource | Available | Budget (8 tiles) |
 |---|---|---|
-| LUTs | 203,800 | ~130K (64%) |
-| FFs | 407,600 | ~155K (38%) |
-| BRAM (36Kb) | 445 | ~272 (61%) |
-| DSP48E1 | 840 | ~160 (19%) |
+| LUTs | 203,800 | ~90K (44%) |
+| FFs | 407,600 | ~59K (14%) |
+| BRAM (36Kb) | 445 | 272 (61%) |
+| DSP48E1 | 840 | 160 (19%) |
 
 ## Prerequisites
 
@@ -51,7 +51,7 @@ A full `lm1_cluster` (8 tiles) wrapped by `lm1_fpga_top`:
 
 ## FPGA-Specific RTL Overrides
 
-Four modules under `rtl/` are FPGA-specific replacements that carry
+Five modules under `rtl/` are FPGA-specific replacements that carry
 synthesis attributes or structural changes for Yosys/BRAM inference.
 The pure RTL under `rtl/core/` is never modified.
 
@@ -59,7 +59,8 @@ The pure RTL under `rtl/core/` is never modified.
 |---|---|---|
 | `lm1_regfile` | No async reset, `(* ram_style = "distributed" *)` | LUTRAM inference |
 | `lm1_tmpl_table` | No async reset, `(* ram_style = "distributed" *)` | LUTRAM inference |
-| `lm1_icache` | Sync BRAM data_store, IC_HIT/IC_SETTLE states | Block RAM inference |
+| `lm1_icache` | Sync BRAM data, LUTRAM tag/valid, isolated write paths | BRAM + LUTRAM inference |
+| `lm1_ic_table` | N 64→16, no async reset on storage (FDRE) | 4× smaller CAM |
 | `lm1_msg_queue` | 4×1D arrays, no mem reset, DEPTH=32 | LUTRAM inference |
 
 ## Pin Constraints
