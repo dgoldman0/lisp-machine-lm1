@@ -1639,12 +1639,17 @@ class Crystal:
 
         If *split* is True (or Shift is held), splits the focused portal
         vertically.  Otherwise adds a tab next to it.
-        Returns the new portal, or None if there's nothing to attach to.
+        If no portal exists yet, creates one at root.
         """
         import pygame
         fp = self._focused_portal
         if not fp:
-            return None
+            # Empty tree — create root portal
+            np = self.create_portal(target, lens_name, label)
+            self.root = Pane(portal=np)
+            self._focused_portal = np
+            self._dirty = True
+            return np
         if split or (pygame.key.get_mods() & pygame.KMOD_SHIFT):
             np = self.split_portal(fp, SplitDir.VERTICAL, ratio=0.5,
                                    new_target=target, new_lens=lens_name,
@@ -1784,6 +1789,14 @@ class Crystal:
 
         # 2. Render tree
         self._render_pane(self.root)
+
+        # Empty desktop hint
+        if not self.root.all_portals():
+            msg = 'Click a launcher in the bar below to open a portal.'
+            mw = len(msg) * vdi.font.char_w
+            mx = (vdi.width - mw) // 2
+            my = (vdi.height - BAR_H) // 2
+            vdi.draw_string(mx, my, msg, C.TEXT_DIM, BG_TRANSPARENT)
 
         # 3. Float overlays
         self._render_floats(self.root)
