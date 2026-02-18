@@ -30,6 +30,8 @@ from .decode import (
     FUNC_PUSH, FUNC_POP,
     FUNC_TILE_ID, FUNC_THREAD_ID, FUNC_CYCLE,
     FUNC_TRAP_CAUSE, FUNC_TRAP_PC,
+    FUNC_CARD_BASE, FUNC_CARD_SHIFT, FUNC_GEN_BOUNDARY,
+    FUNC_QUEUE_BASE, FUNC_GC_STATUS,
     BR_T, BR_NIL, BR_FIX_LT, BR_FIX_EQ, BR_FIX_GT, BR_EQ,
 )
 from .word import make_header
@@ -689,19 +691,34 @@ class Assembler:
             return encode_x(Op.ERET, 0)
         if mn == 'TILE.ID':
             rd = self._reg(args[0], ln)
-            return encode_r(Op.SYS_INFO, rd, 0, 0, FUNC_TILE_ID)
+            return encode_r(Op.SYS_INFO, rd, FUNC_TILE_ID, 0, 0)
         if mn == 'THREAD.ID':
             rd = self._reg(args[0], ln)
-            return encode_r(Op.SYS_INFO, rd, 0, 0, FUNC_THREAD_ID)
+            return encode_r(Op.SYS_INFO, rd, FUNC_THREAD_ID, 0, 0)
         if mn == 'CYCLE':
             rd = self._reg(args[0], ln)
-            return encode_r(Op.SYS_INFO, rd, 0, 0, FUNC_CYCLE)
+            return encode_r(Op.SYS_INFO, rd, FUNC_CYCLE, 0, 0)
         if mn == 'TRAP.CAUSE':
             rd = self._reg(args[0], ln)
-            return encode_r(Op.SYS_INFO, rd, 0, 0, FUNC_TRAP_CAUSE)
+            return encode_r(Op.SYS_INFO, rd, FUNC_TRAP_CAUSE, 0, 0)
         if mn == 'TRAP.PC':
             rd = self._reg(args[0], ln)
-            return encode_r(Op.SYS_INFO, rd, 0, 0, FUNC_TRAP_PC)
+            return encode_r(Op.SYS_INFO, rd, FUNC_TRAP_PC, 0, 0)
+        if mn == 'CARD.BASE':
+            rd = self._reg(args[0], ln)
+            return encode_r(Op.SYS_INFO, rd, FUNC_CARD_BASE, 0, 0)
+        if mn == 'CARD.SHIFT':
+            rd = self._reg(args[0], ln)
+            return encode_r(Op.SYS_INFO, rd, FUNC_CARD_SHIFT, 0, 0)
+        if mn == 'GEN.BOUNDARY':
+            rd = self._reg(args[0], ln)
+            return encode_r(Op.SYS_INFO, rd, FUNC_GEN_BOUNDARY, 0, 0)
+        if mn == 'QUEUE.BASE':
+            rd = self._reg(args[0], ln)
+            return encode_r(Op.SYS_INFO, rd, FUNC_QUEUE_BASE, 0, 0)
+        if mn == 'GC.STATUS':
+            rd = self._reg(args[0], ln)
+            return encode_r(Op.SYS_INFO, rd, FUNC_GC_STATUS, 0, 0)
         if mn == 'HALT':
             return encode_x(Op.HALT_NOP, 0)
         if mn == 'NOP':
