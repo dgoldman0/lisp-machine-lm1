@@ -15,9 +15,9 @@ def main() -> int:
             prog="lm1 desktop",
             description="Launch Crystal Desktop",
         )
-        parser.add_argument("--width", type=int, default=640)
-        parser.add_argument("--height", type=int, default=480)
-        parser.add_argument("--scale", type=int, default=2)
+        parser.add_argument("--width", type=int, default=1024)
+        parser.add_argument("--height", type=int, default=768)
+        parser.add_argument("--scale", type=int, default=1)
         args = parser.parse_args(sys.argv[2:])
 
         from .crystal import launch_crystal

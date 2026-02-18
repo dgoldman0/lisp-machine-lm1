@@ -72,7 +72,7 @@ class C:
     # Pane / portal
     PORTAL_BG       = 0x13131E    # slightly lighter than canvas
     PORTAL_EDGE     = 0x252538    # subtle 1px luminance shift
-    PORTAL_LABEL_FG = 0x6670880   # muted label text
+    PORTAL_LABEL_FG = 0x667088    # muted label text
     FOCUS_GLOW      = 0x00B4D8    # bright teal glow for focus
     FOCUS_GLOW_DIM  = 0x004466    # outer glow
 
@@ -129,13 +129,14 @@ class C:
 # Layout constants
 # ===================================================================
 
-BAR_H          = 32      # crystal bar height
-DIVIDER_W      = 4       # pane divider thickness
-PORTAL_LABEL_H = 18      # tiny label at top of portal
-PORTAL_PAD     = 1       # padding around portal content
+BAR_H          = 28      # crystal bar height
+DIVIDER_W      = 3       # pane divider thickness
+PORTAL_LABEL_H = 22      # label strip at top of portal
+PORTAL_PAD     = 2       # padding around portal content
 FOCUS_GLOW_W   = 2       # focus glow thickness
 MIN_PORTAL_W   = 80
 MIN_PORTAL_H   = 60
+CLOSE_BTN_W    = 18      # close button width in label strip
 
 
 # ===================================================================
@@ -1199,9 +1200,9 @@ class TreeLens:
             return True
         if key == pygame.K_RETURN and 0 <= sel < len(entries):
             name, is_dir, _ = entries[sel]
+            vfs = state.get('_vfs')
+            cwd = state.get('_cwd', '/')
             if is_dir:
-                vfs = state.get('_vfs')
-                cwd = state.get('_cwd', '/')
                 if vfs:
                     new_path = cwd.rstrip('/') + '/' + name
                     try:
@@ -1209,6 +1210,33 @@ class TreeLens:
                         state['_cwd'] = _vfs_normalize(new_path)
                         state['_entries'] = None  # rebuild
                         state['selected'] = 0
+                    except Exception:
+                        pass
+            else:
+                # Open file in editor portal
+                crystal = state.get('_crystal')
+                if crystal and vfs:
+                    fpath = cwd.rstrip('/') + '/' + name
+                    try:
+                        text = vfs.read_text(fpath)
+                        # Find the right-side main area to open in
+                        fp = crystal._focused_portal
+                        all_p = crystal.root.all_portals()
+                        # Find a non-tree portal to replace/tab, or split
+                        target_portal = None
+                        for p in all_p:
+                            if p.lens_name in ('terminal', 'inspect', 'editor'):
+                                target_portal = p
+                                break
+                        if target_portal:
+                            new_p = crystal.add_tab(
+                                target_portal, target=text,
+                                lens_name='editor', label=name)
+                            new_p.state['is_lisp'] = name.endswith('.lisp')
+                            new_p.state['_vfs'] = vfs
+                            new_p.state['path'] = fpath
+                            crystal._focused_portal = new_p
+                        crystal._dirty = True
                     except Exception:
                         pass
             return True
@@ -1716,8 +1744,20 @@ class Crystal:
         # Layout
         self._layout()
 
-        # 1. Canvas
-        vdi.fill_rect(0, 0, vdi.width, vdi.height, C.CANVAS)
+        # 1. Canvas — subtle vertical gradient (banded for speed)
+        top_c = C.CANVAS
+        bot_c = C.CANVAS_END
+        tr = (top_c >> 16) & 0xFF; tg = (top_c >> 8) & 0xFF; tb = top_c & 0xFF
+        br = (bot_c >> 16) & 0xFF; bg_ = (bot_c >> 8) & 0xFF; bb = bot_c & 0xFF
+        h = vdi.height
+        band = 16
+        for y0 in range(0, h, band):
+            bh = min(band, h - y0)
+            t = y0 / max(1, h - 1)
+            cr = int(tr + (br - tr) * t) & 0xFF
+            cg = int(tg + (bg_ - tg) * t) & 0xFF
+            cb = int(tb + (bb - tb) * t) & 0xFF
+            vdi.fill_rect(0, y0, vdi.width, bh, (cr << 16) | (cg << 8) | cb)
 
         # 2. Render tree
         self._render_pane(self.root)
@@ -1791,21 +1831,33 @@ class Crystal:
             vdi.fill_rect(r.x + 1, r.y + 1, 1, r.h - 2, glow)
             vdi.fill_rect(r.x + r.w - 2, r.y + 1, 1, r.h - 2, glow)
 
-        # Portal label (tiny, top-left)
+        # Portal label strip
         label = portal.label or portal.lens_name
         label_rect = Rect(r.x + PORTAL_PAD, r.y + 1,
                           r.w - 2 * PORTAL_PAD, PORTAL_LABEL_H)
-        # Label background
+        # Label background — subtle gradient effect via two-tone
+        label_bg = 0x111120 if is_focused else 0x0C0C16
         vdi.fill_rect(label_rect.x, label_rect.y,
-                      label_rect.w, label_rect.h, C.CANVAS)
+                      label_rect.w, label_rect.h, label_bg)
+        # Bottom edge of label strip
+        vdi.fill_rect(label_rect.x, label_rect.y + label_rect.h - 1,
+                      label_rect.w, 1, edge_color if is_focused else 0x1A1A2A)
         # Label text
-        max_lbl = max(1, label_rect.w // vdi.font.char_w - 1)
-        label_fg = C.TYPE_FN if is_focused else C.TEXT_DIM
-        vdi.draw_string(label_rect.x + 4, label_rect.y + 2,
+        max_lbl = max(1, (label_rect.w - CLOSE_BTN_W - 8) // vdi.font.char_w)
+        label_fg = C.TEXT_BRIGHT if is_focused else C.TEXT_DIM
+        ty = label_rect.y + (label_rect.h - vdi.font.char_h) // 2
+        vdi.draw_string(label_rect.x + 6, ty,
                         label[:max_lbl], label_fg, BG_TRANSPARENT)
+        # Close button [x]
+        cx = label_rect.x + label_rect.w - CLOSE_BTN_W - 2
+        cy = label_rect.y + (label_rect.h - vdi.font.char_h) // 2
+        close_fg = C.TYPE_ERROR if is_focused else 0x444466
+        vdi.draw_string(cx + 4, cy, 'x', close_fg, BG_TRANSPARENT)
 
         # Content rect for lens
         cr = portal.content_rect()
+        # Content background — slightly lighter than canvas
+        vdi.fill_rect(cr.x, cr.y, cr.w, cr.h, C.PORTAL_BG)
         lens = get_lens(portal.lens_name)
         if lens:
             lens.render(vdi, portal.target, cr, is_focused, portal.state)
@@ -1970,6 +2022,13 @@ class Crystal:
             if portal is not self._focused_portal:
                 self._focused_portal = portal
                 self._dirty = True
+            # Close button hit?
+            lr = Rect(portal.rect.x + PORTAL_PAD, portal.rect.y + 1,
+                      portal.rect.w - 2 * PORTAL_PAD, PORTAL_LABEL_H)
+            close_x = lr.x + lr.w - CLOSE_BTN_W - 2
+            if (lr.y <= my < lr.y + lr.h and close_x <= mx < close_x + CLOSE_BTN_W):
+                self.close_portal(portal)
+                return
             # Dispatch click to lens
             cr = portal.content_rect()
             if cr.contains(mx, my):
@@ -2257,6 +2316,7 @@ def _build_default_crystal(crystal: Crystal) -> None:
         crystal.vfs, lens_name='tree', label='Files')
     tree_portal.state['_cwd'] = '/'
     tree_portal.state['_entries'] = None
+    tree_portal.state['_crystal'] = crystal
 
     terminal_portal = crystal.create_portal(
         None, lens_name='terminal', label='Terminal')
@@ -2287,37 +2347,43 @@ def _build_default_crystal(crystal: Crystal) -> None:
     crystal.root = root_pane
     crystal._focused_portal = terminal_portal
 
-    # Bar launcher items
+    # Bar launcher items — add as tabs next to focused portal
     def _open_terminal():
-        p = crystal.create_portal(None, 'terminal', 'Terminal')
-        p.state['_cwd'] = '/'
         if crystal._focused_portal:
-            crystal.split_portal(crystal._focused_portal, SplitDir.HORIZONTAL,
-                                 ratio=0.5, new_target=None,
-                                 new_lens='terminal', new_label='Terminal')
+            np = crystal.add_tab(crystal._focused_portal,
+                                 target=None, lens_name='terminal',
+                                 label='Terminal')
+            np.state['_cwd'] = '/'
+            crystal._focused_portal = np
+            crystal._dirty = True
 
     def _open_files():
-        p = crystal.create_portal(crystal.vfs, 'tree', 'Files')
-        p.state['_cwd'] = '/'
-        p.state['_entries'] = None
         if crystal._focused_portal:
-            crystal.split_portal(crystal._focused_portal, SplitDir.VERTICAL,
-                                 ratio=0.5, new_target=crystal.vfs,
-                                 new_lens='tree', new_label='Files')
+            np = crystal.add_tab(crystal._focused_portal,
+                                 target=crystal.vfs, lens_name='tree',
+                                 label='Files')
+            np.state['_cwd'] = '/'
+            np.state['_entries'] = None
+            crystal._focused_portal = np
+            crystal._dirty = True
 
     def _open_editor():
         text = '(defun hello ()\n  (print "Hello, Crystal!"))\n\n(hello)\n'
         if crystal._focused_portal:
-            p = crystal.split_portal(crystal._focused_portal, SplitDir.VERTICAL,
-                                     ratio=0.5, new_target=text,
-                                     new_lens='editor', new_label='*scratch*')
-            p.state['is_lisp'] = True
+            np = crystal.add_tab(crystal._focused_portal,
+                                 target=text, lens_name='editor',
+                                 label='*scratch*')
+            np.state['is_lisp'] = True
+            crystal._focused_portal = np
+            crystal._dirty = True
 
     def _open_calculator():
         if crystal._focused_portal:
-            crystal.split_portal(crystal._focused_portal, SplitDir.VERTICAL,
-                                 ratio=0.5, new_target=None,
-                                 new_lens='interactive', new_label='Calculator')
+            np = crystal.add_tab(crystal._focused_portal,
+                                 target=None, lens_name='interactive',
+                                 label='Calculator')
+            crystal._focused_portal = np
+            crystal._dirty = True
 
     def _open_inspector():
         info = {
@@ -2327,9 +2393,11 @@ def _build_default_crystal(crystal: Crystal) -> None:
             'portals': len(crystal.root.all_portals()),
         }
         if crystal._focused_portal:
-            crystal.split_portal(crystal._focused_portal, SplitDir.HORIZONTAL,
-                                 ratio=0.5, new_target=info,
-                                 new_lens='inspect', new_label='Inspector')
+            np = crystal.add_tab(crystal._focused_portal,
+                                 target=info, lens_name='inspect',
+                                 label='Inspector')
+            crystal._focused_portal = np
+            crystal._dirty = True
 
     crystal.bar_items = [
         BarItem(label='Terminal', icon_name='terminal', action=_open_terminal),
