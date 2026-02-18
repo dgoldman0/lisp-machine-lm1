@@ -172,6 +172,7 @@ module lm1_control
         S_PUSH_FRAME_2,
         S_POP_FRAME_0,
         S_POP_FRAME_W0,
+        S_POP_FRAME_LD_LR,
         S_POP_FRAME_1,
         S_POP_FRAME_W1,
         S_POP_FRAME_2,
@@ -187,6 +188,7 @@ module lm1_control
         S_ALLOC_INIT_W,
         S_ALLOC_INIT2,
         S_ALLOC_INIT2_W,
+        S_ALLOC_RD_CDR,
         S_ALLOC_DONE,
         S_HDR_READ,
         S_HDR_WAIT,
@@ -337,6 +339,7 @@ module lm1_control
             pc         <= pc_n;
             cyc        <= cyc_inc ? (cyc + 64'd1) : cyc;
 
+
             // FGMT: save/restore thread context at instruction boundaries
             // When entering S_FETCH from a completed instruction, save
             // current thread PC and switch to next active thread.
@@ -356,8 +359,17 @@ module lm1_control
                             break;
                         end
                     end
-                    cur_thread <= next_t;
-                    pc         <= thread_pc[next_t];
+                    // Only override pc when actually switching to a
+                    // different thread.  When next_t == cur_thread
+                    // (single active thread), the default pc <= pc_n
+                    // already has the correct value; overriding it with
+                    // thread_pc[next_t] would read the stale (pre-save)
+                    // value due to non-blocking assignment semantics and
+                    // cause every instruction to execute twice.
+                    if (next_t != cur_thread) begin
+                        cur_thread <= next_t;
+                        pc         <= thread_pc[next_t];
+                    end
                 end
             end else if (state == S_RESET) begin
                 // At reset exit, load thread 0's PC
@@ -1056,7 +1068,9 @@ module lm1_control
                         rf_w_data = new_np;
                         cyc_inc   = 1'b0;
                         pc_n      = pc;
-                        ns        = S_ALLOC_HDR;
+                        // Need an extra cycle to capture rs2 (cdr) since
+                        // rf_rd1_addr was overridden to read NP above.
+                        ns        = S_ALLOC_RD_CDR;
                     end
                 end
             end
@@ -1162,8 +1176,10 @@ module lm1_control
                     endcase
                     ns = S_FETCH;
                 end else begin
-                    cyc_inc = 1'b0;
-                    pc_n    = pc;
+                    // User trap: advance PC past the TRAP instruction
+                    // so that ERET returns to the instruction after TRAP.
+                    // (pc_n and cyc_inc keep their S_EXECUTE defaults:
+                    //  pc_n = pc + 4, cyc_inc = 1)
                     ns      = S_TRAP_LOOKUP;
                 end
             end
@@ -1527,6 +1543,11 @@ module lm1_control
                         rf_w_data = lsu_rdata;
                         // SP += 8
                         ta_n = ta + 64'd8;
+                        // Defer PC advance and cycle count to S_MULTI_SP_WR
+                        // (S_MEM_WAIT default already set cyc_inc=1, pc_n=pc+4
+                        //  but S_MULTI_SP_WR will also set them → double advance)
+                        cyc_inc = 1'b0;
+                        pc_n    = pc;
                         ns   = S_MULTI_SP_WR;  // write SP
                     end
                 end
@@ -1769,16 +1790,22 @@ module lm1_control
 
         S_POP_FRAME_W0: begin
             if (lsu_valid) begin
-                // Restore FP
+                // Restore FP from loaded data
                 rf_we     = 1'b1;
                 rf_w_addr = banked_addr(cur_thread, REG_FP);
                 rf_w_data = lsu_rdata;
-                // Load saved LR from mem[FP+8]
-                lsu_req   = 1'b1;
-                lsu_op    = LSU_LOAD64;
-                lsu_addr  = ta + 64'd8;
-                if (lsu_ready) ns = S_POP_FRAME_1;
+                // Next cycle: issue load for saved LR
+                ns = S_POP_FRAME_LD_LR;
             end
+        end
+
+        S_POP_FRAME_LD_LR: begin
+            // Issue load of saved LR from mem[FP+8]
+            // (LSU is back in IDLE now after the previous load completed)
+            lsu_req   = 1'b1;
+            lsu_op    = LSU_LOAD64;
+            lsu_addr  = ta + 64'd8;
+            if (lsu_ready) ns = S_POP_FRAME_1;
         end
 
         S_POP_FRAME_1: begin
@@ -1993,6 +2020,19 @@ module lm1_control
         S_ALLOC_INIT_W: begin
             // Wait for car write, then write cdr
             if (lsu_valid) ns = S_ALLOC_INIT2;
+        end
+
+        // ---------------------------------------------------------
+        // ALLOC_RD_CDR: capture rs2 (cdr value) for ALLOC.CONS
+        //
+        // In S_EXECUTE, rf_rd1_addr was overridden to read NP/NL,
+        // which prevents the default opc_n = rf_rd1_data from
+        // capturing regs[rs2]. This state reads rs2 on port 1.
+        // ---------------------------------------------------------
+        S_ALLOC_RD_CDR: begin
+            rf_rd1_addr = banked_addr(cur_thread, dr.rs2);
+            opc_n       = rf_rd1_data;
+            ns          = S_ALLOC_HDR;
         end
 
         S_ALLOC_INIT2: begin

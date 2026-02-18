@@ -1,12 +1,12 @@
 -Info: /home/kir/Documents/scrap/list-machine/tb/lm1_tb.sv:192: $dumpvar ignored, as Verilated without --trace
-CPU halted after 30 cycles (PC=10)
+CPU halted after 43 cycles (PC=1c)
 REG r0 = 0000000000000000
-REG r1 = 000000000000002a
-REG r2 = ffffffffffffffff
-REG r3 = 0000000000001234
-REG r4 = 0000000000000000
-REG r5 = 0000000000000000
-REG r6 = 0000000000000000
+REG r1 = 00000000000000ff
+REG r2 = 000000000000000f
+REG r3 = 000000000000000f
+REG r4 = 00000000000000ff
+REG r5 = 00000000000000f0
+REG r6 = ffffffffffffff00
 REG r7 = 0000000000000000
 REG r8 = 0000000000000000
 REG r9 = 0000000000000000

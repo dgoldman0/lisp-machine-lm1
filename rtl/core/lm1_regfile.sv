@@ -33,20 +33,14 @@ module lm1_regfile
     localparam int TOTAL_REGS = NUM_THREADS * NREGS;
     logic [XLEN-1:0] regs [0:TOTAL_REGS-1];
 
-    // Asynchronous read with write-through (bypass)
-    always_comb begin
-        if (w_en && (ra_addr == w_addr))
-            ra_data = w_data;
-        else
-            ra_data = regs[ra_addr];
-    end
-
-    always_comb begin
-        if (w_en && (rb_addr == w_addr))
-            rb_data = w_data;
-        else
-            rb_data = regs[rb_addr];
-    end
+    // Asynchronous read — no write-through bypass.
+    // The multi-cycle FSM never needs same-cycle read-after-write;
+    // reads and writes always occur in separate FSM states, so the
+    // synchronous write (available next posedge) is sufficient.
+    // Removing the bypass eliminates combinational loops through
+    // read-modify-write patterns (PUSH SP, ALLOC NP, PUSH_FRAME SP).
+    assign ra_data = regs[ra_addr];
+    assign rb_data = regs[rb_addr];
 
     // Synchronous write
     always_ff @(posedge clk or negedge rst_n) begin

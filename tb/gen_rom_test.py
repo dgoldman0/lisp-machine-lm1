@@ -55,10 +55,11 @@ ROM_SOURCE = r"""
 ;
 ; Memory layout:
 ;   0x0000 .. code     : program instructions
-;   0x4000 .. 0x7FF8   : stack (grows down from 0x7FF8)
-;   0x8000 .. 0x8400   : trap table (128 entries × 8 bytes)
-;   0x9000 .. 0x9100   : card table (256 bytes)
-;   0xA000 .. 0xFFFF   : nursery (heap for ALLOC)
+;   0x4000             : stack top (grows down)
+;   0x5000 .. 0x5400   : trap table (128 entries × 8 bytes)
+;   0x6000 .. 0x6100   : card table (256 bytes)
+;   0x7000 .. 0x7FF0   : nursery (heap for ALLOC)
+;   0x7800             : gen boundary (old-gen starts here)
 ;
 ; Registers on exit (checked by testbench):
 ;   r1  = result of factorial(5) as tagged fixnum  = tag(120) = 240
@@ -76,13 +77,13 @@ ROM_SOURCE = r"""
 ; ===================================================================
 
 ; Named constants
-.equ STACK_TOP,      0x7FF8
-.equ TRAP_TABLE,     0x8000
-.equ CARD_TABLE,     0x9000
-.equ NURSERY_BASE,   0xA000
-.equ NURSERY_LIMIT,  0xFFFF
+.equ STACK_TOP,      0x4000
+.equ TRAP_TABLE,     0x5000
+.equ CARD_TABLE,     0x6000
+.equ NURSERY_BASE,   0x7000
+.equ NURSERY_LIMIT,  0x7FF0
 .equ CARD_SHIFT,     6
-.equ GEN_BOUNDARY_V, 0xC000
+.equ GEN_BOUNDARY_V, 0x7800
 
 ; Trap sub-codes for system setup
 .equ SYS_SET_TRAP,   0x90
@@ -104,12 +105,10 @@ _start:
     TRAP SYS_SET_TRAP
 
     ; Write our custom trap handler address into slot 0x42 of the trap table
-    ; trap table entry addr = TRAP_TABLE + 0x42*8 = 0x8000 + 0x210 = 0x8210
+    ; trap table entry addr = TRAP_TABLE + 0x42*8 = 0x5000 + 0x210 = 0x5210
     LI  r14, trap_handler_42
-    LI  r15, 0x210
-    LUI r13, 8           ; r13 = 0x8000
-    ADD r15, r15, r13    ; r15 = 0x8210
-    STR r15, r14, 0      ; mem[0x8210] = trap_handler_42
+    LI  r15, 0x5210
+    STR r15, r14, 0      ; mem[0x5210] = trap_handler_42
 
     ; --- Install header templates ---
     ; Template 0: cons cell header = size=2, shape=1, sub=1
@@ -213,21 +212,20 @@ _start:
     ; Allocate an object in old-gen (address >= GEN_BOUNDARY),
     ; store a young-gen ref into it → barrier should fire and mark card.
     ;
-    ; The nursery starts at 0xA000. GEN_BOUNDARY = 0xC000.
-    ; If NP >= 0xC000 at allocation time, the object is in old-gen.
+    ; The nursery starts at 0x7000. GEN_BOUNDARY = 0x7800.
+    ; If NP >= 0x7800 at allocation time, the object is in old-gen.
     ; We can force this by moving NP past GEN_BOUNDARY.
     ; ===================================================================
-    ; Save current NP
+    ; Save current NP before barrier test
     MOV r13, np
-
-    ; Move NP into old-gen region (past 0xC000)
+    ; Move NP into old-gen region (past GEN_BOUNDARY_V = 0x7800)
     LI  np, GEN_BOUNDARY_V
     ; Allocate a 3-field object (template 1) in old-gen
     ALLOC r10, 3, 1     ; r10 = ref to obj at GEN_BOUNDARY_V (old-gen)
 
-    ; Now store a young-gen ref (the cons we made earlier, which is at ~0xA000)
+    ; Now store a young-gen ref (the cons we made earlier, which is at ~0x7000)
     ; into old-gen object → barrier should fire
-    ; r3 still holds the cons ref (young-gen, addr < 0xC000)
+    ; r3 still holds the cons ref (young-gen, addr < GEN_BOUNDARY_V)
     ST.WB r10, r3, 0    ; store young ref into old-gen obj, field 0
 
     ; Read back the barrier fire perf counter
@@ -238,15 +236,13 @@ _start:
     ; Let me just read the card table byte directly to verify the barrier wrote it.
 
     ; Card addr = CARD_TABLE + (obj_addr >> CARD_SHIFT)
-    ; obj_addr = GEN_BOUNDARY_V = 0xC000
-    ; card_index = 0xC000 >> 6 = 0x300
-    ; card_addr = 0x9000 + 0x300 = 0x9300
-    LI  r14, 0x300
-    LUI r13, 9
-    ADD r14, r14, r13    ; r14 = 0x9300 (card byte address)
-    LDR r14, r14, 0      ; r14 = mem[0x9300] (64-bit word containing card byte)
+    ; obj_addr = GEN_BOUNDARY_V = 0x7800
+    ; card_index = 0x7800 >> 6 = 0x1E0
+    ; card_addr = 0x6000 + 0x1E0 = 0x61E0
+    LI  r14, 0x61E0
+    LDR r14, r14, 0      ; r14 = mem[0x61E0] (64-bit word containing card byte)
     ; The byte store wrote 0xFF at byte offset 0 within the word
-    ; So the low byte of the 64-bit word at 0x9300 should be 0xFF
+    ; So the low byte of the 64-bit word at 0x61E0 should be 0xFF
 
     ; Restore NP
     MOV np, r13
