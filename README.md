@@ -1,8 +1,8 @@
 # LM-1: A Many-Tile Dynamic-Object Processor for Lisp
 
-**Project Status:** Standards Development  
+**Project Status:** Standards Development + RTL Implementation + Emulator  
 **Revision:** 0.1-draft  
-**Date:** 2026-02-16
+**Date:** 2026-02-18
 
 ---
 
@@ -45,6 +45,29 @@ The ISA is designed around ~8 semantic instruction families that map directly to
 | [design/emulator.md](design/emulator.md) | Emulator architecture and bringup plan |
 | [design/bios.md](design/bios.md) | BIOS / firmware: boot sequence, trap tables, image loader |
 | [design/os.md](design/os.md) | Lispos: actors, object system, GC, storage, REPL |
+| [design/desktop.md](design/desktop.md) | Crystal: GEM-inspired desktop (current implementation) |
+| [design/surface.md](design/surface.md) | Surface: next-gen Lisp-native interface concept |
+
+### RTL Implementation
+
+| Directory | Description |
+|-----------|-------------|
+| [rtl/core/](rtl/core/) | CPU core: ALU, decoder, control FSM, register file, LSU, I-cache, IC table |
+| [rtl/tile/](rtl/tile/) | Tile: core + SRAM + message queues |
+| [rtl/cluster/](rtl/cluster/) | Cluster: 8 tiles + crossbar + shared SRAM |
+| [rtl/gc/](rtl/gc/) | GC engines: scanner, copier, fixup |
+| [rtl/tech/](rtl/tech/) | Technology wrappers: SRAMs, clock gating |
+| [rtl/target/xilinx7/](rtl/target/xilinx7/) | FPGA target: Genesys 2 (Kintex-7 325T) constraints |
+| [rtl/doc/](rtl/doc/) | RTL design documentation |
+| [fpga/](fpga/) | FPGA top-level wrapper + synthesis file lists |
+| [tb/](tb/) | Verilator testbench: 42 tests, test generators |
+
+### Emulator
+
+| Directory | Description |
+|-----------|-------------|
+| [emu/lm1/](emu/lm1/) | Python emulator: core, executor, compiler, VDI, desktop, VFS, toolkit |
+| [emu/tests/](emu/tests/) | Emulator test suite: 258 tests across 13 phases |
 
 ## Influences and Prior Art
 
