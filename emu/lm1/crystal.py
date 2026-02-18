@@ -218,10 +218,12 @@ class Portal:
     state: dict = field(default_factory=dict)  # lens-private state
     rect: Rect = field(default_factory=lambda: Rect(0, 0, 0, 0))
     pid: int = 0                        # portal id
+    _in_tab: bool = False               # True when inside a tab group
 
     def content_rect(self) -> Rect:
         """Rectangle available for the lens to draw in."""
-        return self.rect.shrink(t=PORTAL_LABEL_H, l=PORTAL_PAD,
+        top = 0 if self._in_tab else PORTAL_LABEL_H
+        return self.rect.shrink(t=top, l=PORTAL_PAD,
                                 r=PORTAL_PAD, b=PORTAL_PAD)
 
 
@@ -1708,12 +1710,16 @@ class Crystal:
 
         if pane.portal:
             pane.portal.rect = rect
+            pane.portal._in_tab = False
             return
 
         if pane.tab_mode and pane.children:
             # Tab header takes 22px
             tab_h = 22
             for i, child in enumerate(pane.children):
+                # Mark portals inside tabs
+                if child.portal:
+                    child.portal._in_tab = True
                 if i == pane.active_tab:
                     content_rect = Rect(rect.x, rect.y + tab_h,
                                         rect.w, rect.h - tab_h)
@@ -1831,28 +1837,29 @@ class Crystal:
             vdi.fill_rect(r.x + 1, r.y + 1, 1, r.h - 2, glow)
             vdi.fill_rect(r.x + r.w - 2, r.y + 1, 1, r.h - 2, glow)
 
-        # Portal label strip
-        label = portal.label or portal.lens_name
-        label_rect = Rect(r.x + PORTAL_PAD, r.y + 1,
-                          r.w - 2 * PORTAL_PAD, PORTAL_LABEL_H)
-        # Label background — subtle gradient effect via two-tone
-        label_bg = 0x111120 if is_focused else 0x0C0C16
-        vdi.fill_rect(label_rect.x, label_rect.y,
-                      label_rect.w, label_rect.h, label_bg)
-        # Bottom edge of label strip
-        vdi.fill_rect(label_rect.x, label_rect.y + label_rect.h - 1,
-                      label_rect.w, 1, edge_color if is_focused else 0x1A1A2A)
-        # Label text
-        max_lbl = max(1, (label_rect.w - CLOSE_BTN_W - 8) // vdi.font.char_w)
-        label_fg = C.TEXT_BRIGHT if is_focused else C.TEXT_DIM
-        ty = label_rect.y + (label_rect.h - vdi.font.char_h) // 2
-        vdi.draw_string(label_rect.x + 6, ty,
-                        label[:max_lbl], label_fg, BG_TRANSPARENT)
-        # Close button [x]
-        cx = label_rect.x + label_rect.w - CLOSE_BTN_W - 2
-        cy = label_rect.y + (label_rect.h - vdi.font.char_h) // 2
-        close_fg = C.TYPE_ERROR if is_focused else 0x444466
-        vdi.draw_string(cx + 4, cy, 'x', close_fg, BG_TRANSPARENT)
+        # Portal label strip — skip if inside a tab group (tab header handles it)
+        if not portal._in_tab:
+            label = portal.label or portal.lens_name
+            label_rect = Rect(r.x + PORTAL_PAD, r.y + 1,
+                              r.w - 2 * PORTAL_PAD, PORTAL_LABEL_H)
+            # Label background — subtle gradient effect via two-tone
+            label_bg = 0x111120 if is_focused else 0x0C0C16
+            vdi.fill_rect(label_rect.x, label_rect.y,
+                          label_rect.w, label_rect.h, label_bg)
+            # Bottom edge of label strip
+            vdi.fill_rect(label_rect.x, label_rect.y + label_rect.h - 1,
+                          label_rect.w, 1, edge_color if is_focused else 0x1A1A2A)
+            # Label text
+            max_lbl = max(1, (label_rect.w - CLOSE_BTN_W - 8) // vdi.font.char_w)
+            label_fg = C.TEXT_BRIGHT if is_focused else C.TEXT_DIM
+            ty = label_rect.y + (label_rect.h - vdi.font.char_h) // 2
+            vdi.draw_string(label_rect.x + 6, ty,
+                            label[:max_lbl], label_fg, BG_TRANSPARENT)
+            # Close button [x]
+            cx = label_rect.x + label_rect.w - CLOSE_BTN_W - 2
+            cy = label_rect.y + (label_rect.h - vdi.font.char_h) // 2
+            close_fg = C.TYPE_ERROR if is_focused else 0x444466
+            vdi.draw_string(cx + 4, cy, 'x', close_fg, BG_TRANSPARENT)
 
         # Content rect for lens
         cr = portal.content_rect()
@@ -1881,7 +1888,8 @@ class Crystal:
                 label = child.portal.label or child.portal.lens_name
             elif child.children:
                 label = f'pane {i}'
-            tab_w = max(60, len(label) * cw + 16)
+            close_w = cw + 6  # space for [x] on each tab
+            tab_w = max(60, len(label) * cw + close_w + 16)
 
             is_active = (i == pane.active_tab)
             bg = C.PORTAL_BG if is_active else C.CANVAS
@@ -1890,7 +1898,13 @@ class Crystal:
             if is_active:
                 vdi.fill_rect(tx, r.y + 1, tab_w, 2, C.FOCUS_GLOW)
             vdi.draw_string(tx + 8, r.y + (tab_h - ch) // 2,
-                            label[:tab_w // cw - 2], fg, BG_TRANSPARENT)
+                            label[:(tab_w - close_w - 12) // cw],
+                            fg, BG_TRANSPARENT)
+            # Tab close [x]
+            close_fg = C.TYPE_ERROR if is_active else 0x444466
+            vdi.draw_string(tx + tab_w - close_w - 2,
+                            r.y + (tab_h - ch) // 2,
+                            'x', close_fg, BG_TRANSPARENT)
             tx += tab_w + 2
 
     def _render_floats(self, pane: Pane) -> None:
@@ -2006,7 +2020,28 @@ class Crystal:
         # Tab header click?
         tab_pane = self._tab_header_hit(self.root, mx, my)
         if tab_pane:
-            pane, tab_idx = tab_pane
+            pane, tab_idx, is_close = tab_pane
+            if is_close and len(pane.children) > 1:
+                # Close tab — remove the child and adjust active_tab
+                closed_child = pane.children[tab_idx]
+                pane.children.pop(tab_idx)
+                if pane.active_tab >= len(pane.children):
+                    pane.active_tab = len(pane.children) - 1
+                pane.active_tab = max(0, pane.active_tab)
+                # If only one tab left, unwrap the tab group
+                if len(pane.children) == 1:
+                    pane.tab_mode = False
+                    only = pane.children[0]
+                    pane.portal = only.portal
+                    pane.children = only.children
+                    pane.split = only.split
+                    pane.ratio = only.ratio
+                # Focus next
+                portals = pane.all_portals()
+                if portals:
+                    self._focused_portal = portals[0]
+                self._dirty = True
+                return
             pane.active_tab = tab_idx
             # Focus the portal in that tab
             if 0 <= tab_idx < len(pane.children):
@@ -2022,13 +2057,14 @@ class Crystal:
             if portal is not self._focused_portal:
                 self._focused_portal = portal
                 self._dirty = True
-            # Close button hit?
-            lr = Rect(portal.rect.x + PORTAL_PAD, portal.rect.y + 1,
-                      portal.rect.w - 2 * PORTAL_PAD, PORTAL_LABEL_H)
-            close_x = lr.x + lr.w - CLOSE_BTN_W - 2
-            if (lr.y <= my < lr.y + lr.h and close_x <= mx < close_x + CLOSE_BTN_W):
-                self.close_portal(portal)
-                return
+            # Close button hit? (only for non-tab portals)
+            if not portal._in_tab:
+                lr = Rect(portal.rect.x + PORTAL_PAD, portal.rect.y + 1,
+                          portal.rect.w - 2 * PORTAL_PAD, PORTAL_LABEL_H)
+                close_x = lr.x + lr.w - CLOSE_BTN_W - 2
+                if (lr.y <= my < lr.y + lr.h and close_x <= mx < close_x + CLOSE_BTN_W):
+                    self.close_portal(portal)
+                    return
             # Dispatch click to lens
             cr = portal.content_rect()
             if cr.contains(mx, my):
@@ -2177,21 +2213,29 @@ class Crystal:
                     return result
         return None
 
-    def _tab_header_hit(self, pane: Pane, mx: int, my: int) -> tuple[Pane, int] | None:
-        """Check if we hit a tab header.  Returns (pane, tab_index)."""
+    def _tab_header_hit(self, pane: Pane, mx: int, my: int
+                        ) -> tuple[Pane, int, bool] | None:
+        """Check if we hit a tab header.
+
+        Returns (pane, tab_index, is_close_btn).
+        """
         if pane.tab_mode and pane.children:
             r = pane.rect
             tab_h = 22
             if r.y <= my < r.y + tab_h and r.x <= mx < r.x + r.w:
                 cw = self.vdi.font.char_w
+                close_w = cw + 6
                 tx = r.x + 2
                 for i, child in enumerate(pane.children):
                     label = ''
                     if child.portal:
                         label = child.portal.label or child.portal.lens_name
-                    tab_w = max(60, len(label) * cw + 16)
+                    tab_w = max(60, len(label) * cw + close_w + 16)
                     if tx <= mx < tx + tab_w:
-                        return (pane, i)
+                        # Check if hit the close [x] area
+                        close_x = tx + tab_w - close_w - 2
+                        is_close = mx >= close_x
+                        return (pane, i, is_close)
                     tx += tab_w + 2
             # Check active tab children
             if 0 <= pane.active_tab < len(pane.children):
