@@ -1215,30 +1215,24 @@ class TreeLens:
                     except Exception:
                         pass
             else:
-                # Open file in editor portal
+                # Open file in editor portal (Shift = split, else tab)
                 crystal = state.get('_crystal')
                 if crystal and vfs:
                     fpath = cwd.rstrip('/') + '/' + name
                     try:
                         text = vfs.read_text(fpath)
-                        # Find the right-side main area to open in
-                        fp = crystal._focused_portal
+                        # Focus a non-tree portal first so file opens there
                         all_p = crystal.root.all_portals()
-                        # Find a non-tree portal to replace/tab, or split
-                        target_portal = None
                         for p in all_p:
                             if p.lens_name in ('terminal', 'inspect', 'editor'):
-                                target_portal = p
+                                crystal._focused_portal = p
                                 break
-                        if target_portal:
-                            new_p = crystal.add_tab(
-                                target_portal, target=text,
-                                lens_name='editor', label=name)
-                            new_p.state['is_lisp'] = name.endswith('.lisp')
-                            new_p.state['_vfs'] = vfs
-                            new_p.state['path'] = fpath
-                            crystal._focused_portal = new_p
-                        crystal._dirty = True
+                        np = crystal.open_portal(
+                            target=text, lens_name='editor', label=name)
+                        if np:
+                            np.state['is_lisp'] = name.endswith('.lisp')
+                            np.state['_vfs'] = vfs
+                            np.state['path'] = fpath
                     except Exception:
                         pass
             return True
@@ -1638,6 +1632,29 @@ class Crystal:
 
         self._dirty = True
         return new_portal
+
+    def open_portal(self, target: Any = None, lens_name: str = 'inspect',
+                    label: str = '', split: bool = False) -> Portal | None:
+        """Open a new portal as a tab or split.
+
+        If *split* is True (or Shift is held), splits the focused portal
+        vertically.  Otherwise adds a tab next to it.
+        Returns the new portal, or None if there's nothing to attach to.
+        """
+        import pygame
+        fp = self._focused_portal
+        if not fp:
+            return None
+        if split or (pygame.key.get_mods() & pygame.KMOD_SHIFT):
+            np = self.split_portal(fp, SplitDir.VERTICAL, ratio=0.5,
+                                   new_target=target, new_lens=lens_name,
+                                   new_label=label)
+        else:
+            np = self.add_tab(fp, target=target, lens_name=lens_name,
+                              label=label)
+        self._focused_portal = np
+        self._dirty = True
+        return np
 
     def close_portal(self, portal: Portal) -> None:
         """Remove a portal from the tree."""
@@ -2391,43 +2408,31 @@ def _build_default_crystal(crystal: Crystal) -> None:
     crystal.root = root_pane
     crystal._focused_portal = terminal_portal
 
-    # Bar launcher items — add as tabs next to focused portal
+    # Bar launcher items — click = tab, Shift-click = split
     def _open_terminal():
-        if crystal._focused_portal:
-            np = crystal.add_tab(crystal._focused_portal,
-                                 target=None, lens_name='terminal',
+        np = crystal.open_portal(target=None, lens_name='terminal',
                                  label='Terminal')
+        if np:
             np.state['_cwd'] = '/'
-            crystal._focused_portal = np
-            crystal._dirty = True
 
     def _open_files():
-        if crystal._focused_portal:
-            np = crystal.add_tab(crystal._focused_portal,
-                                 target=crystal.vfs, lens_name='tree',
+        np = crystal.open_portal(target=crystal.vfs, lens_name='tree',
                                  label='Files')
+        if np:
             np.state['_cwd'] = '/'
             np.state['_entries'] = None
-            crystal._focused_portal = np
-            crystal._dirty = True
+            np.state['_crystal'] = crystal
 
     def _open_editor():
         text = '(defun hello ()\n  (print "Hello, Crystal!"))\n\n(hello)\n'
-        if crystal._focused_portal:
-            np = crystal.add_tab(crystal._focused_portal,
-                                 target=text, lens_name='editor',
+        np = crystal.open_portal(target=text, lens_name='editor',
                                  label='*scratch*')
+        if np:
             np.state['is_lisp'] = True
-            crystal._focused_portal = np
-            crystal._dirty = True
 
     def _open_calculator():
-        if crystal._focused_portal:
-            np = crystal.add_tab(crystal._focused_portal,
-                                 target=None, lens_name='interactive',
-                                 label='Calculator')
-            crystal._focused_portal = np
-            crystal._dirty = True
+        crystal.open_portal(target=None, lens_name='interactive',
+                            label='Calculator')
 
     def _open_inspector():
         info = {
@@ -2436,12 +2441,8 @@ def _build_default_crystal(crystal: Crystal) -> None:
             'resolution': f'{crystal.vdi.width}x{crystal.vdi.height}',
             'portals': len(crystal.root.all_portals()),
         }
-        if crystal._focused_portal:
-            np = crystal.add_tab(crystal._focused_portal,
-                                 target=info, lens_name='inspect',
-                                 label='Inspector')
-            crystal._focused_portal = np
-            crystal._dirty = True
+        crystal.open_portal(target=info, lens_name='inspect',
+                            label='Inspector')
 
     crystal.bar_items = [
         BarItem(label='Terminal', icon_name='terminal', action=_open_terminal),
