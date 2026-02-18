@@ -254,11 +254,13 @@ def test_close_split_portal():
 
 @test("crystal_close_root_portal", batch="phase15")
 def test_close_root_portal():
+    """Closing the last portal is refused — always keep at least one."""
     crystal = _make_crystal()
     p = crystal.set_root_portal("x", 'inspect')
     crystal.close_portal(p)
-    assert crystal.root.portal is None
-    assert crystal._focused_portal is None
+    # Last portal is protected — tree stays intact
+    assert crystal.root.portal is p
+    assert crystal._focused_portal is p
 
 
 @test("crystal_close_updates_focus", batch="phase15")

@@ -137,6 +137,8 @@ FOCUS_GLOW_W   = 2       # focus glow thickness
 MIN_PORTAL_W   = 80
 MIN_PORTAL_H   = 60
 CLOSE_BTN_W    = 18      # close button width in label strip
+MAX_TABS       = 12      # max tabs per group before refusing
+MAX_DEPTH      = 8       # max nesting depth before refusing splits
 
 
 # ===================================================================
@@ -1613,6 +1615,10 @@ class Crystal:
         if pane is None:
             return portal
 
+        # Guard: cap tab count
+        if pane.tab_mode and len(pane.children) >= MAX_TABS:
+            return portal
+
         new_portal = self.create_portal(
             target if target is not None else portal.target,
             lens_name, label)
@@ -1630,6 +1636,7 @@ class Crystal:
             pane.children = [old_pane, new_pane]
             pane.active_tab = 1
 
+        self._sanitize_tree()
         self._dirty = True
         return new_portal
 
@@ -1662,13 +1669,19 @@ class Crystal:
         return np
 
     def close_portal(self, portal: Portal) -> None:
-        """Remove a portal from the tree."""
+        """Remove a portal from the tree.
+
+        Refuses to close the very last portal — the desktop always keeps
+        at least one living expression.
+        """
+        all_portals = self.root.all_portals()
+        if len(all_portals) <= 1:
+            # Last portal — refuse to close, don't leave user stranded
+            return
+
         parent = self._find_parent_pane(self.root, portal)
         if parent is None:
-            # Root portal — clear
-            self.root = Pane()
-            self._focused_portal = None
-            self._dirty = True
+            # Root portal but we have more than 1 somehow — shouldn't happen
             return
 
         # Find which child contains this portal
@@ -1693,10 +1706,8 @@ class Crystal:
                 parent.active_tab = min(parent.active_tab,
                                         len(parent.children) - 1)
 
-        # Update focus
-        if self._focused_portal is portal:
-            all_portals = self.root.all_portals()
-            self._focused_portal = all_portals[0] if all_portals else None
+        # Sanitize tree and update focus
+        self._sanitize_tree()
         self._dirty = True
 
     def _find_pane_for_portal(self, pane: Pane, portal: Portal) -> Pane | None:
@@ -1716,6 +1727,71 @@ class Crystal:
             if result:
                 return result
         return None
+
+    # ------------------------------------------------------------------
+    # Tree sanitization — heal degenerate structures
+    # ------------------------------------------------------------------
+
+    def _sanitize_tree(self) -> None:
+        """Walk the tree and fix structural problems.
+
+        Called after every structural change (split, tab, close) to
+        keep the expression tree healthy without limiting user power.
+        """
+        self._sanitize_pane(self.root)
+        # Ensure focused portal is still alive
+        all_p = self.root.all_portals()
+        if self._focused_portal not in all_p:
+            self._focused_portal = all_p[0] if all_p else None
+
+    def _sanitize_pane(self, pane: Pane) -> None:
+        """Recursively fix a pane subtree."""
+        # 1. Remove empty children (no portal, no sub-children)
+        if pane.children:
+            pane.children = [c for c in pane.children
+                            if c.portal or c.children]
+
+        # 2. Single-child split → collapse
+        if pane.split and not pane.tab_mode and len(pane.children) == 1:
+            only = pane.children[0]
+            pane.portal = only.portal
+            pane.split = only.split
+            pane.ratio = only.ratio
+            pane.children = only.children
+            pane.tab_mode = only.tab_mode
+            pane.active_tab = only.active_tab
+
+        # 3. Tab group with 0 or 1 tab → unwrap
+        if pane.tab_mode:
+            if len(pane.children) == 0:
+                pane.tab_mode = False
+            elif len(pane.children) == 1:
+                only = pane.children[0]
+                pane.portal = only.portal
+                pane.split = only.split
+                pane.ratio = only.ratio
+                pane.children = only.children
+                pane.tab_mode = only.tab_mode
+                pane.active_tab = only.active_tab
+            else:
+                pane.active_tab = max(0, min(pane.active_tab,
+                                             len(pane.children) - 1))
+
+        # 4. Split with no children → make empty leaf
+        if pane.split and not pane.children:
+            pane.split = None
+
+        # Recurse
+        for child in pane.children:
+            self._sanitize_pane(child)
+
+    def _tree_depth(self, pane: Pane | None = None) -> int:
+        """Return the maximum depth of the pane tree."""
+        if pane is None:
+            pane = self.root
+        if pane.is_leaf() or not pane.children:
+            return 1
+        return 1 + max(self._tree_depth(c) for c in pane.children)
 
     # ------------------------------------------------------------------
     # Layout — walk tree, compute rects
@@ -2052,25 +2128,15 @@ class Crystal:
         if tab_pane:
             pane, tab_idx, is_close = tab_pane
             if is_close and len(pane.children) > 1:
-                # Close tab — remove the child and adjust active_tab
-                closed_child = pane.children[tab_idx]
-                pane.children.pop(tab_idx)
-                if pane.active_tab >= len(pane.children):
-                    pane.active_tab = len(pane.children) - 1
-                pane.active_tab = max(0, pane.active_tab)
-                # If only one tab left, unwrap the tab group
-                if len(pane.children) == 1:
-                    pane.tab_mode = False
-                    only = pane.children[0]
-                    pane.portal = only.portal
-                    pane.children = only.children
-                    pane.split = only.split
-                    pane.ratio = only.ratio
-                # Focus next
-                portals = pane.all_portals()
-                if portals:
-                    self._focused_portal = portals[0]
-                self._dirty = True
+                # Close tab via close_portal if it's a leaf
+                child = pane.children[tab_idx]
+                if child.portal:
+                    self.close_portal(child.portal)
+                else:
+                    # Sub-pane tab — just remove it
+                    pane.children.pop(tab_idx)
+                    self._sanitize_tree()
+                    self._dirty = True
                 return
             pane.active_tab = tab_idx
             # Focus the portal in that tab
@@ -2122,10 +2188,14 @@ class Crystal:
             pane, axis = self._drag_divider
             r = pane.rect
             if axis == 'v' and r.w > 0:
-                new_ratio = _clamp(mx - r.x - self._drag_offset, 50, r.w - 50) / r.w
+                min_px = MIN_PORTAL_W
+                new_ratio = _clamp(mx - r.x - self._drag_offset,
+                                   min_px, r.w - min_px) / r.w
                 pane.ratio = new_ratio
             elif axis == 'h' and r.h > 0:
-                new_ratio = _clamp(my - r.y - self._drag_offset, 50, r.h - 50) / r.h
+                min_px = MIN_PORTAL_H
+                new_ratio = _clamp(my - r.y - self._drag_offset,
+                                   min_px, r.h - min_px) / r.h
                 pane.ratio = new_ratio
             self._dirty = True
             return
