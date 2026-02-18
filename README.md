@@ -45,8 +45,7 @@ The ISA is designed around ~8 semantic instruction families that map directly to
 | [design/emulator.md](design/emulator.md) | Emulator architecture and bringup plan |
 | [design/bios.md](design/bios.md) | BIOS / firmware: boot sequence, trap tables, image loader |
 | [design/os.md](design/os.md) | Lispos: actors, object system, GC, storage, REPL |
-| [design/desktop.md](design/desktop.md) | Crystal: GEM-inspired desktop (current implementation) |
-| [design/surface.md](design/surface.md) | Surface: next-gen Lisp-native interface concept |
+| [design/desktop.md](design/desktop.md) | Crystal: Lisp-native desktop environment |
 
 ### RTL Implementation
 

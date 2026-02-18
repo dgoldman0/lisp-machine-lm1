@@ -48,46 +48,9 @@ Collected during development. Not committed to — just possibilities.
 - **`letrec`:** Mutually recursive local bindings. Needed for complex algorithms.
 - **Pattern matching:** `(match expr (pattern body) ...)` — extremely useful, compiles to nested conditionals.
 
-## Surface — Post-Crystal Desktop Concept
+## Crystal Open Questions
 
-Crystal (the current GEM-inspired desktop) is a 1985 metaphor with Lisp syntax on top.
-Surface is a rethinking of what a desktop environment should be on a Lisp Machine — one
-where homoiconicity is the *reason* the interface works, not a bolted-on feature.
-
-See [design/surface.md](design/surface.md) for the full design. Key ideas:
-
-- **The screen is a live expression tree.** Not windows containing apps — a single nested
-  s-expression that evaluates into pixels. Edit any node, the display updates instantly.
-  The interface IS the program.
-
-- **Portals replace windows.** A portal is a live lens onto any Lisp object. Same object,
-  many lenses: view a function as source code, disassembly, flame chart, call graph,
-  test results. A lens is just a function — no plugin API needed.
-
-- **Threads replace clipboard/IPC.** Data-flow connections between portals. Drag from one
-  portal's output to another's input. Data flows continuously, typed and structured.
-
-- **Facets = semantic zoom.** Every object renders at multiple scales (glyph → card →
-  full interactive view). Zoom out and your screen is a map of your system.
-
-- **Reactive propagation for free.** Piggybacks on the GC write-barrier card table.
-  Change an object from any tile/actor, all portals viewing it update automatically.
-
-- **Worlds = branching reality.** Save/load/branch/merge your entire computing environment.
-  Fork your desktop to try something risky. Merge it back or discard.
-
-- **The using/programming boundary dissolves.** Arranging portals = composing expressions.
-  Recording actions = collecting a list. Parameterizing a recording = wrapping in a lambda.
-  Every interaction the user learns to do by pointing and clicking has an s-expression
-  equivalent they can automate and compose.
-
-- **No windows, menus, file manager, or applications** — just objects, lenses, panes,
-  and composition. Crystal's AES/window layer is replaced by the compositor; VDI survives
-  unchanged.
-
-### Open Questions
-
-- How much of Crystal's widget toolkit survives? Lenses probably use widgets internally
+- How much of the widget toolkit survives? Lenses probably use widgets internally
   for things like text editing, but the toolkit doesn't need to be visible to users.
 - Portal performance: can we diff-render a portal when its target changes, or do we
   full-redraw? The reactive engine needs to be smart about granularity.
