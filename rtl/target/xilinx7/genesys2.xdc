@@ -58,9 +58,18 @@ set_property -dict {PACKAGE_PIN W23 IOSTANDARD LVCMOS33} [get_ports {led[7]}]
 ## ============================================================================
 ## Timing constraints
 ## ============================================================================
-## The core runs from sys_clk_200 through an MMCM.  When the MMCM is
-## added, create a generated clock constraint here.  For the initial
-## raw-clock synthesis, the 200 MHz input clock applies everywhere.
+## 200 MHz input clock drives MMCME2_BASE → 100 MHz core_clk.
+## The generated clock is automatically created by the tools from the MMCM
+## output.  For Vivado, use create_generated_clock; for Yosys/nextpnr,
+## the input clock propagation is sufficient.
+##
+## If using place-and-route tools that require explicit generated clocks:
+## create_generated_clock -name core_clk -source [get_pins u_mmcm/CLKIN1] \
+##     -divide_by 2 [get_pins u_mmcm/CLKOUT0]
 
 ## False-path for async reset synchroniser
 set_false_path -from [get_ports sys_rst_n]
+
+## MMCM locked is async to core_clk — false path on the raw signal
+## (it's sampled through the reset shift register)
+set_false_path -from [get_pins u_mmcm/LOCKED]

@@ -5,8 +5,9 @@
 // for synthesis and board-level testing.
 //
 // Features:
-//   - MMCM placeholder (raw board clock for initial synthesis)
-//   - Shift-register reset debouncer
+//   - IBUFDS differential clock receiver (200 MHz LVDS)
+//   - MMCME2_BASE PLL: 200 MHz → 100 MHz core clock
+//   - Reset synchroniser gated by MMCM locked
 //   - External memory port exposed for tile 0 (program load via
 //     UART/JTAG loader); remaining tiles share the same image
 //     via broadcast or SW copy.
@@ -30,7 +31,8 @@ module lm1_fpga_top
     parameter int TILES            = 8
 )
 (
-    input  logic        sys_clk,       // board oscillator (200 MHz on Genesys 2)
+    input  logic        sys_clk_p,     // 200 MHz LVDS+ (Genesys 2 AD12)
+    input  logic        sys_clk_n,     // 200 MHz LVDS− (Genesys 2 AD11)
     input  logic        sys_rst_n,     // active-low reset button
 
     // --- Status LEDs ---
@@ -53,22 +55,76 @@ module lm1_fpga_top
 );
 
     // ---------------------------------------------------------------
-    // Clock & Reset
+    // Clock Generation
+    //
+    // IBUFDS:      200 MHz LVDS differential → single-ended
+    // MMCME2_BASE: 200 MHz → 100 MHz core clock
+    //   VCO = 200 × 5 / 1 = 1000 MHz  (range: 600–1200 MHz for -2)
+    //   CLKOUT0 = 1000 / 10 = 100 MHz
+    // BUFG:        global clock distribution
     // ---------------------------------------------------------------
-    // For the initial synthesis test the core runs on the raw board
-    // clock.  Replace with MMCM instantiation when target Fmax is known.
-    logic core_clk;
-    assign core_clk = sys_clk;
+    logic clk_200_ibuf;   // single-ended 200 MHz from IBUFDS
+    logic clk_100_mmcm;   // 100 MHz from MMCM (pre-BUFG)
+    logic clk_fb;         // MMCM feedback
+    logic mmcm_locked;    // MMCM locked indicator
+    logic core_clk;       // 100 MHz global clock
 
-    // Synchronous reset with debounce shift register (4 cycles)
+    IBUFDS u_ibufds (
+        .I  (sys_clk_p),
+        .IB (sys_clk_n),
+        .O  (clk_200_ibuf)
+    );
+
+    MMCME2_BASE #(
+        .CLKIN1_PERIOD   (5.000),    // 200 MHz input
+        .CLKFBOUT_MULT_F (5.0),      // VCO = 200 × 5 = 1000 MHz
+        .CLKOUT0_DIVIDE_F(10.0),     // 1000 / 10 = 100 MHz
+        .DIVCLK_DIVIDE   (1),
+        .CLKFBOUT_PHASE  (0.0),
+        .CLKOUT0_PHASE   (0.0),
+        .CLKOUT0_DUTY_CYCLE(0.5),
+        .STARTUP_WAIT    ("FALSE")
+    ) u_mmcm (
+        .CLKIN1   (clk_200_ibuf),
+        .CLKFBIN  (clk_fb),
+        .CLKFBOUT (clk_fb),
+        .CLKOUT0  (clk_100_mmcm),
+        .CLKOUT0B (),
+        .CLKOUT1  (),
+        .CLKOUT1B (),
+        .CLKOUT2  (),
+        .CLKOUT2B (),
+        .CLKOUT3  (),
+        .CLKOUT3B (),
+        .CLKOUT4  (),
+        .CLKOUT5  (),
+        .CLKOUT6  (),
+        .LOCKED   (mmcm_locked),
+        .PWRDWN   (1'b0),
+        .RST      (~sys_rst_n)       // MMCM reset (active-high)
+    );
+
+    BUFG u_bufg_core (
+        .I (clk_100_mmcm),
+        .O (core_clk)
+    );
+
+    // ---------------------------------------------------------------
+    // Reset Synchroniser
+    //
+    // Shift-register debouncer on core_clk domain.
+    // Reset held until BOTH sys_rst_n is released AND MMCM is locked.
+    // ---------------------------------------------------------------
     logic [3:0] rst_sr;
     logic        rst_n;
 
     always_ff @(posedge core_clk or negedge sys_rst_n) begin
         if (!sys_rst_n)
             rst_sr <= '0;
-        else
+        else if (mmcm_locked)
             rst_sr <= {rst_sr[2:0], 1'b1};
+        else
+            rst_sr <= '0;
     end
     assign rst_n = rst_sr[3];
 
