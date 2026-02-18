@@ -72,7 +72,6 @@ module lm1_lsu
     lsu_state_t state, state_next;
 
     logic [3:0]      op_reg;
-    logic [XLEN-1:0] addr_reg;
     logic             addr_bit2;  // addr[2] for 32-bit half selection
 
     // ---------------------------------------------------------------
@@ -84,14 +83,12 @@ module lm1_lsu
         if (!rst_n) begin
             state    <= LSU_IDLE;
             op_reg   <= LSU_OP_NONE;
-            addr_reg <= '0;
             addr_bit2<= 1'b0;
             addr_low <= 3'b0;
         end else begin
             state <= state_next;
             if (state == LSU_IDLE && req_valid) begin
                 op_reg    <= req_op;
-                addr_reg  <= req_addr;
                 addr_bit2 <= req_addr[2];
                 addr_low  <= req_addr[2:0];
             end

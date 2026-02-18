@@ -61,20 +61,21 @@ module lm1_alu
         DIV_DONE
     } div_state_t;
 
-    div_state_t          div_state, div_state_next;
-    logic [XLEN-1:0]     div_dividend, div_divisor;
+    div_state_t          div_state;
+    logic [XLEN-1:0]     div_dividend;
     logic [6:0]          div_count;
-    logic                div_busy;
     logic                div_by_zero;
 
     // Iterative unsigned divider (1 bit per cycle, 64 cycles)
     logic [XLEN-1:0]     div_q, div_r;
     logic [XLEN-1:0]     div_d;  // divisor register
+    /* verilator lint_off UNUSEDSIGNAL */  // reserved for future MOD.FIX
     logic                div_is_fix;     // tagged fixnum divide in progress
+    /* verilator lint_on UNUSEDSIGNAL */
     logic                div_sign_q;     // quotient sign (a_neg ^ b_neg)
-    logic                div_sign_r;     // remainder sign (follows dividend)
-
-    assign div_busy = (div_state != DIV_IDLE);
+    /* verilator lint_off UNUSEDSIGNAL */  // reserved for future MOD.FIX
+    logic                div_sign_r;     // remainder sign (follows dividend, for future MOD.FIX)
+    /* verilator lint_on UNUSEDSIGNAL */
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -101,7 +102,6 @@ module lm1_alu
                             div_r       <= '0;
                             div_d       <= operand_b;
                             div_dividend<= operand_a;
-                            div_divisor <= operand_b;
                             div_count   <= 7'd63;
                             div_is_fix  <= 1'b0;
                             div_state   <= DIV_RUNNING;
@@ -134,7 +134,6 @@ module lm1_alu
                             div_r        <= '0;
                             div_d        <= abs_b;
                             div_dividend <= abs_a;
-                            div_divisor  <= abs_b;
                             div_count    <= 7'd63;
                             div_state    <= DIV_RUNNING;
                         end

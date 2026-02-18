@@ -89,9 +89,13 @@ module lm1_cpu
     output logic               xbar_req_we,
     output logic [XLEN-1:0]   xbar_req_addr,
     output logic [XLEN-1:0]   xbar_req_wdata,
+    /* verilator lint_off UNUSEDSIGNAL */  // TODO(multi-tile): not yet consumed
     input  logic               xbar_req_ready,
+    /* verilator lint_on UNUSEDSIGNAL */
     input  logic [XLEN-1:0]   xbar_resp_data,
+    /* verilator lint_off UNUSEDSIGNAL */  // TODO(multi-tile): not yet consumed
     input  logic               xbar_resp_valid
+    /* verilator lint_on UNUSEDSIGNAL */
 );
 
     // ---------------------------------------------------------------
@@ -202,31 +206,29 @@ module lm1_cpu
 
     // ---------------------------------------------------------------
     // The decoder produces dec + imm_sext from the latched instruction.
-    // The control FSM latches these at decode time.
-    logic [REG_IDX_W-1:0] dec_rf_rd, dec_rf_rs1, dec_rf_rs2;
-    logic                 dec_rf_we, dec_rf_rd_rs2;
-    logic                 dec_is_alu, dec_is_load, dec_is_store;
-    logic                 dec_is_branch, dec_is_jump, dec_is_system;
-    logic                 dec_is_alloc, dec_is_multi, dec_is_nop;
+    // The control FSM latches these at decode time.  Decoder convenience
+    // outputs (rf indices, classification flags) are unused — the FSM
+    // reads them from the decoded_t struct directly.
+    // ---------------------------------------------------------------
 
     lm1_decoder u_decoder (
         .inst_word   (inst_latched),
         .dec         (dec_fields),
         .imm_sext    (dec_imm_sext),
-        .rf_rd_idx   (dec_rf_rd),
-        .rf_rs1_idx  (dec_rf_rs1),
-        .rf_rs2_idx  (dec_rf_rs2),
-        .rf_we       (dec_rf_we),
-        .rf_rd_rs2   (dec_rf_rd_rs2),
-        .is_alu_op   (dec_is_alu),
-        .is_mem_load (dec_is_load),
-        .is_mem_store(dec_is_store),
-        .is_branch   (dec_is_branch),
-        .is_jump     (dec_is_jump),
-        .is_system   (dec_is_system),
-        .is_alloc    (dec_is_alloc),
-        .is_multi_cycle(dec_is_multi),
-        .is_nop      (dec_is_nop)
+        .rf_rd_idx   (),
+        .rf_rs1_idx  (),
+        .rf_rs2_idx  (),
+        .rf_we       (),
+        .rf_rd_rs2   (),
+        .is_alu_op   (),
+        .is_mem_load (),
+        .is_mem_store(),
+        .is_branch   (),
+        .is_jump     (),
+        .is_system   (),
+        .is_alloc    (),
+        .is_multi_cycle(),
+        .is_nop      ()
     );
 
     // ---------------------------------------------------------------

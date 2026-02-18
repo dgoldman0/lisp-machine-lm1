@@ -44,9 +44,11 @@ module lm1_cluster
     // --- NoC uplink (stub — one port for the whole cluster) ---
     output logic               noc_tx_valid,
     output logic [XLEN-1:0]   noc_tx_data,
+    /* verilator lint_off UNUSEDSIGNAL */  // stub: NoC not implemented
     input  logic               noc_tx_ready,
     input  logic               noc_rx_valid,
     input  logic [XLEN-1:0]   noc_rx_data,
+    /* verilator lint_on UNUSEDSIGNAL */
     output logic               noc_rx_ready,
 
     // --- DMA port (stub — cluster ↔ HBM) ---
@@ -54,9 +56,11 @@ module lm1_cluster
     output logic               dma_req_we,
     output logic [XLEN-1:0]   dma_req_addr,
     output logic [XLEN-1:0]   dma_req_wdata,
+    /* verilator lint_off UNUSEDSIGNAL */  // stub: DMA not implemented
     input  logic               dma_req_ready,
     input  logic [XLEN-1:0]   dma_resp_data,
     input  logic               dma_resp_valid
+    /* verilator lint_on UNUSEDSIGNAL */
 );
 
     // ---------------------------------------------------------------

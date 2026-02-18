@@ -355,7 +355,7 @@ module lm1_control
                     next_t = cur_thread;
                     for (int i = 1; i <= NUM_THREADS; i++) begin
                         logic [THREAD_IDX_W-1:0] candidate;
-                        candidate = (cur_thread + THREAD_IDX_W'(i)) & (NUM_THREADS-1);
+                        candidate = THREAD_IDX_W'((THREAD_IDX_W'(cur_thread) + THREAD_IDX_W'(i)) & THREAD_IDX_W'(NUM_THREADS-1));
                         if (thread_active[candidate]) begin
                             next_t = candidate;
                             break;
@@ -390,7 +390,7 @@ module lm1_control
                     next_t = cur_thread;
                     for (int i = 1; i < NUM_THREADS; i++) begin
                         logic [THREAD_IDX_W-1:0] candidate;
-                        candidate = (cur_thread + THREAD_IDX_W'(i)) & (NUM_THREADS-1);
+                        candidate = THREAD_IDX_W'((THREAD_IDX_W'(cur_thread) + THREAD_IDX_W'(i)) & THREAD_IDX_W'(NUM_THREADS-1));
                         if (thread_active[candidate] && !found_active) begin
                             next_t = candidate;
                             found_active = 1'b1;
