@@ -25,6 +25,16 @@ The ISA is designed around ~8 semantic instruction families that map directly to
 4. **Many tiles beat one big core.** Area goes to tile count and SRAM, not OoO windows.
 5. **Explicit movement beats implicit coherence** at scale. Local heaps + message passing + DMA.
 
+## Component Integration
+
+While the stand-alone LM-1 repo has the SoC as a standalone chip, the most likely home for this system is as part of a partner system with the [Megapad-64 Forth Machine](https://github.com/dgoldman0/megapad/) architecture using a chiplet approach. The Forth Machine handles a lot of the control, I/O, number crunching, and the Lisp machine engine acts as a partner device. Current idea for combined SoC name: Leviathan. 
+
+## Status
+
+Assume everything is rough draft, both in this project and in the megapad project. 
+
+Feel free top drop by and discuss this project in the Tinkerers Guild channel of the Barayin-Adamah server: https://discord.gg/AnrXxhs3b2
+
 ## Documentation Map
 
 | Document | Description |
